@@ -1,75 +1,84 @@
-📹 Video Compression & Adaptive Streaming Platform
+# Video Compression & Adaptive Streaming Platform
 
-A full-stack platform for uploading, compressing, storing, and streaming VP9/Opus videos with adaptive multi-resolution support.
-Built with Node.js, Express, FFmpeg, MySQL, React, Multer, and Docker-ready architecture.
+A complete video compression and adaptive streaming service built using **Node.js, Express, FFmpeg (VP9 + Opus), React, MySQL, Multer, and Docker**. This platform compresses uploaded videos into multiple resolutions and streams them efficiently using HTTP Range requests.
 
-🚀 Features
-🔧 Backend (Node.js + FFmpeg)
+---
 
-Compresses videos using VP9 (libvpx-vp9) with Opus audio
+## 🚀 Features
 
-Reduces file size by ~65% using CRF-based encoding
+* **Multi-resolution video compression** (720p, 480p, 360p)
+* **VP9 + Opus codec** for high-quality compression
+* **Adaptive CRF values** for optimal file size reduction
+* **Secure upload API** using Multer
+* **Real-time FFmpeg logs** while compressing
+* **REST API for listing videos and versions**
+* **HTTP Range-based streaming API**
+* **MySQL database integration** for storing metadata
+* **Docker-ready structure**
 
-Generates multiple resolutions automatically:
+---
 
-720p, 480p, 360p
+## 🛠️ Tech Stack
 
-Adaptive CRF values:
+* **Backend:** Node.js, Express.js
+* **Video Compression:** FFmpeg (libvpx-vp9, libopus)
+* **Database:** MySQL
+* **Storage:** Local filesystem (`uploads/`, `compressed/`)
+* **File Upload:** Multer
+* **Frontend (Optional):** React
+* **Containerization:** Docker
 
-720p → CRF 32
+---
 
-480p → CRF 34
+## 📁 Project Structure
 
-360p → CRF 36
+```bash
+project/
+├── uploads/              # Raw uploaded videos
+├── compressed/           # Compressed video outputs
+├── server.js             # Main server file
+├── package.json
+└── README.md
+```
 
-Stores video metadata and versions in MySQL
+---
 
-Upload handling using Multer
+## ⚙️ Installation
 
-Streaming with HTTP Range headers (required for seeking & smooth playback)
+### 1. Clone the repository
 
-Real-time FFmpeg progress logs
+```bash
+git clone <repo-url>
+cd project
+```
 
-Static file serving for compressed output
+### 2. Install dependencies
 
-🎨 Frontend (React)
+```bash
+npm install
+```
 
-Upload videos
+### 3. Install FFmpeg
 
-List all videos with available resolutions
+Windows 11 users can install FFmpeg via:
 
-Play videos by selecting a desired version
+```bash
+choco install ffmpeg
+```
 
-Adaptive playback with <video> element
+or manually from ffmpeg.org.
 
-🏗️ Tech Stack
-Layer	Technologies
-Backend	Node.js, Express, FFmpeg, Multer, MySQL2
-Frontend	React
-Database	MySQL
-Video Codec	VP9 (libvpx-vp9), Opus
-Containerization	Docker-Ready
-📁 Project Structure (Backend)
-/uploads             → Temporary uploaded files
-/compressed          → FFmpeg output videos (multi-resolution)
-/src or root         → Express server (index.js/server.js)
-/frontend            → React app (optional)
+### 4. Set up MySQL database
 
-⚙️ Requirements
-Install FFmpeg (Windows 11)
+Create a database:
 
-Download FFmpeg from: https://www.gyan.dev/ffmpeg/builds/
-
-Add it to PATH:
-
-Control Panel → System → Advanced System Settings → PATH → Add FFmpeg bin folder
-
-Install MySQL
-
-Create database:
-
+```sql
 CREATE DATABASE newVid;
+```
 
+Create required tables:
+
+```sql
 CREATE TABLE videos (
   id INT AUTO_INCREMENT PRIMARY KEY,
   original_filename VARCHAR(255),
@@ -84,140 +93,102 @@ CREATE TABLE video_versions (
   resolution INT,
   FOREIGN KEY (video_id) REFERENCES videos(id)
 );
+```
 
-🔌 Environment Setup (Backend)
-1. Install dependencies
-npm install
+Update credentials in `server.js`:
 
-2. Update MySQL credentials
-
-In the server file:
-
+```js
 const db = mysql.createConnection({
   host: "localhost",
   user: "root",
-  password: "your_password",
+  password: "yourpassword",
   database: "newVid",
 });
+```
 
-3. Run server
+---
+
+## ▶️ Running the Server
+
+Start the backend:
+
+```bash
 node server.js
+```
 
+Server runs at:
 
-Server starts on:
-
+```
 http://localhost:5000
+```
 
-🧪 API Endpoints
-📤 1. Upload Video
+---
 
-POST /upload
-Form-Data:
+## 📤 API Endpoints
 
-video: <file>
+### **1. Upload a video**
 
+**POST** `/upload`
 
-Response:
+* Accepts: `form-data` → `video: <file>`
+* Compresses the video to 720p, 480p, 360p
+* Stores metadata in MySQL
 
+**Response:**
+
+```json
 {
   "message": "Video uploaded & compressed",
   "versions": [
-    { "resolution": 720, "filename": "...720p.webm" },
-    { "resolution": 480, "filename": "...480p.webm" },
-    { "resolution": 360, "filename": "...360p.webm" }
+    { "resolution": 720, "filename": "...", "path": "..." }
   ]
 }
+```
 
-📄 2. Get All Videos
+---
 
-GET /videos
+### **2. Get all videos**
 
-Response:
+**GET** `/videos`
 
-[
-  {
-    "id": 1,
-    "original_filename": "example.mp4",
-    "versions": [
-      { "id": 10, "filename": "...720p.webm", "resolution": 720 },
-      { "id": 11, "filename": "...480p.webm", "resolution": 480 }
-    ]
-  }
-]
+Returns grouped video metadata and all available compressed versions.
 
-▶️ 3. Stream Video
+---
 
-GET /stream/:filename
+### **3. Stream a compressed video**
 
-Supports:
+**GET** `/stream/:filename`
 
-Range requests
-
-Seeking
-
-Browser video playback
+Supports HTTP Range headers for smooth streaming on video players.
 
 Example:
 
-http://localhost:5000/stream/17000000123-720p.webm
+```
+http://localhost:5000/stream/1731859959-720p.webm
+```
 
-🎮 Frontend Usage (React)
+---
 
-Your React app can:
+Build and run:
 
-Upload via /upload
+```bash
+docker build -t video-compressor .
+docker run -p 5000:5000 video-compressor
+```
 
-Fetch list via /videos
+---
 
-Play videos using:
+## 📌 Notes
 
-<video controls src={`http://localhost:5000/stream/${filename}`} />
+* Uses CRF mode to maintain quality instead of fixed bitrate.
+* Deletes the original uploaded video after compression to save space.
+* Uses `libvpx-vp9` for efficient WebM compression.
 
-🛠️ How the Compression Pipeline Works
+---
 
-User uploads a source video → stored in /uploads
+## 📄 License
 
-FFmpeg runs 3 sequential encodes:
+MIT
 
-Scale to 720p, 480p, 360p
+---
 
-Encode using libvpx-vp9
-
-Apply CRF (quality) and bitrate settings
-
-Compressed files stored in /compressed
-
-MySQL saves metadata for:
-
-Original file
-
-All versions with resolution and path
-
-React frontend lists videos + resolutions
-
-When streamed:
-
-Server handles Range requests
-
-Sends partial chunks for smooth playback and seeking
-
-📦 Output Example
-compressed/
-  1700000000-720p.webm
-  1700000000-480p.webm
-  1700000000-360p.webm
-
-🧩 Future Enhancements
-
-Adaptive streaming via DASH or HLS
-
-JWT-based authentication
-
-Automatic cleanup for old original files
-
-Progress bar using WebSockets
-
-❤️ Credits
-
-Built using Node.js, FFmpeg, React, and MySQL.
-Optimized for VP9 + Opus compression workflows.
