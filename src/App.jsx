@@ -1,129 +1,7 @@
-// import { useState, useEffect } from "react";
-
-// function App() {
-//   const [file, setFile] = useState(null);
-//   const [videos, setVideos] = useState([]);
-//   const [selectedVideo, setSelectedVideo] = useState(null);
-//   const [selectedResolution, setSelectedResolution] = useState(null);
-
-//   // Fetch videos from server
-//   const fetchVideos = async () => {
-//     try {
-//       const res = await fetch("http://localhost:5000/videos");
-//       const data = await res.json();
-//       setVideos(data);
-//     } catch (err) {
-//       console.error("Error fetching videos:", err);
-//     }
-//   };
-
-//   useEffect(() => {
-//     fetchVideos();
-//   }, []);
-
-//   // Upload handler
-//   const handleUpload = async (e) => {
-//     e.preventDefault();
-//     if (!file) return alert("Please select a file");
-
-//     const formData = new FormData();
-//     formData.append("video", file);
-
-//     try {
-//       const res = await fetch("http://localhost:5000/upload", {
-//         method: "POST",
-//         body: formData,
-//       });
-
-//       if (!res.ok) throw new Error("Upload failed");
-
-//       const data = await res.json();
-//       alert("Upload successful");
-
-//       setFile(null);
-//       fetchVideos(); // Refresh list
-//     } catch (err) {
-//       console.error(err);
-//       alert("Error uploading");
-//     }
-//   };
-
-//   // Handle video selection
-//   const handleSelectVideo = (video) => {
-//     setSelectedVideo(video);
-//     // Default to highest resolution
-//     const sortedRes = [...video.versions].sort(
-//       (a, b) => parseInt(b.resolution) - parseInt(a.resolution)
-//     );
-//     setSelectedResolution(sortedRes[0]);
-//   };
-
-//   return (
-//     <div style={{ padding: "20px" }}>
-//       <h1>Teacher Upload Portal</h1>
-
-//       {/* Upload Form */}
-//       <form onSubmit={handleUpload}>
-//         <input type="file" onChange={(e) => setFile(e.target.files[0])} />
-//         <button type="submit">Upload</button>
-//       </form>
-
-//       <hr />
-
-//       {/* Video List */}
-//       <h2>Available Videos</h2>
-//       <ul>
-//         {videos.map((vid) => (
-//           <li key={vid.id}>
-//             {vid.original_filename}{" "}
-//             <button onClick={() => handleSelectVideo(vid)}>Play</button>
-//           </li>
-//         ))}
-//       </ul>
-
-//       {/* Video Player */}
-//       {selectedVideo && selectedResolution && (
-//         <div>
-//           <h3>Now Playing: {selectedVideo.original_filename}</h3>
-
-//           {/* Resolution selector */}
-//           <div>
-//             <label>Select Resolution: </label>
-//             <select
-//               value={selectedResolution.resolution}
-//               onChange={(e) =>
-//                 setSelectedResolution(
-//                   selectedVideo.versions.find(
-//                     (v) => v.resolution === e.target.value
-//                   )
-//                 )
-//               }
-//             >
-//               {selectedVideo.versions
-//                 .sort((a, b) => parseInt(b.resolution) - parseInt(a.resolution))
-//                 .map((v) => (
-//                   <option key={v.id} value={v.resolution}>
-//                     {v.resolution}p
-//                   </option>
-//                 ))}
-//             </select>
-//           </div>
-
-//           <video
-//             width="640"
-//             controls
-//             src={`http://localhost:5000/stream/${selectedResolution.filename}`}
-//             type="video/webm"
-//           />
-//         </div>
-//       )}
-//     </div>
-//   );
-// }
-
-// export default App;
-
 import { useState, useEffect } from "react";
+import { io } from "socket.io-client";
+
+const socket = io("http://localhost:5000");
 
 function App() {
   const [file, setFile] = useState(null);
@@ -145,6 +23,22 @@ function App() {
 
   useEffect(() => {
     fetchVideos();
+
+    // NEW: Listen for the success event from the server
+    socket.on("video-completed", (data) => {
+      alert(data.message); // In a real app, use a nice toast notification here!
+      fetchVideos(); // Automatically refresh the list!
+    });
+
+    socket.on("video-failed", (data) => {
+      alert(`Video processing failed for Job ${data.jobId}`);
+    });
+
+    // Cleanup listener when component unmounts
+    return () => {
+      socket.off("video-completed");
+      socket.off("video-failed");
+    };
   }, []);
 
   // Upload handler
@@ -164,11 +58,15 @@ function App() {
 
       if (!res.ok) throw new Error("Upload failed");
 
-      await res.json();
-      alert("Upload successful");
+      // We now get a Job ID back from the queue!
+      const data = await res.json();
+      alert(
+        `Upload successful! Video is now processing in the background. (Job ID: ${data.jobId})`,
+      );
 
       setFile(null);
-      fetchVideos(); // Refresh list
+      // We might want to fetch videos here, but the new video won't have its resolutions yet!
+      fetchVideos();
     } catch (err) {
       console.error(err);
       alert("Error uploading");
@@ -182,7 +80,7 @@ function App() {
     setSelectedVideo(video);
     // Default to highest resolution
     const sortedRes = [...video.versions].sort(
-      (a, b) => parseInt(b.resolution) - parseInt(a.resolution)
+      (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
     );
     setSelectedResolution(sortedRes[0]);
   };
@@ -266,8 +164,8 @@ function App() {
               onChange={(e) =>
                 setSelectedResolution(
                   selectedVideo.versions.find(
-                    (v) => v.resolution === e.target.value
-                  )
+                    (v) => v.resolution === e.target.value,
+                  ),
                 )
               }
               className="px-3 py-2 border rounded-md"
