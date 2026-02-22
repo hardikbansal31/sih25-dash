@@ -15,6 +15,10 @@ const db = await mysql.createConnection({
 
 const compressedDir = path.join(process.cwd(), "compressed");
 
+// Resolutions & CRF values for VP9
+const resolutions = [720, 480, 360];
+const crfs = { 720: 32, 480: 34, 360: 36 }; // higher CRF → smaller file
+
 // (Paste your existing compressVideoVP9 function here)
 // Compress a video using VP9 + Opus with CRF + show real-time logs
 function compressVideoVP9(inputPath) {

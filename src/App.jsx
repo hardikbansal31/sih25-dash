@@ -14,10 +14,21 @@ function App() {
   const fetchVideos = async () => {
     try {
       const res = await fetch("http://localhost:5000/videos");
+
+      if (!res.ok) {
+        throw new Error("Server error");
+      }
+
       const data = await res.json();
-      setVideos(data);
+
+      if (Array.isArray(data)) {
+        setVideos(data);
+      } else {
+        setVideos([]);
+      }
     } catch (err) {
       console.error("Error fetching videos:", err);
+      setVideos([]); // prevent crash
     }
   };
 

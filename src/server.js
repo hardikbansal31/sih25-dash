@@ -14,6 +14,13 @@ const server = http.createServer(app);
 const PORT = 5000;
 
 // Enable CORS
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    methods: ["GET", "POST"],
+  }),
+);
+
 const io = new Server(server, {
   cors: {
     origin: "http://localhost:5173", // Your React app's URL
@@ -57,10 +64,6 @@ db.connect((err) => {
   else console.log("Connected to MySQL");
 });
 
-// Resolutions & CRF values for VP9
-const resolutions = [720, 480, 360];
-const crfs = { 720: 32, 480: 34, 360: 36 }; // higher CRF → smaller file
-
 // Upload route
 app.post("/upload", upload.single("video"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded" });
@@ -96,7 +99,6 @@ app.post("/upload", upload.single("video"), async (req, res) => {
   }
 });
 
-// Get all videos with versions
 app.get("/videos", (req, res) => {
   const sql = `
     SELECT v.id as video_id, v.original_filename, vv.id as version_id, vv.filename, vv.resolution
@@ -106,21 +108,35 @@ app.get("/videos", (req, res) => {
   `;
 
   db.query(sql, (err, results) => {
-    if (err) return res.status(500).json({ error: "Failed to fetch videos" });
+    if (err) {
+      console.error("Database error in /videos:", err);
 
-    // Group versions by video
+      // If tables don't exist, return empty array instead of crashing frontend
+      if (err.code === "ER_NO_SUCH_TABLE") {
+        return res.json([]);
+      }
+
+      return res.status(500).json({
+        error: "Database error",
+        details: err.message,
+      });
+    }
+
     const grouped = results.reduce((acc, v) => {
-      if (!acc[v.video_id])
+      if (!acc[v.video_id]) {
         acc[v.video_id] = {
           id: v.video_id,
           original_filename: v.original_filename,
           versions: [],
         };
+      }
+
       acc[v.video_id].versions.push({
         id: v.version_id,
         filename: v.filename,
         resolution: v.resolution,
       });
+
       return acc;
     }, {});
 
