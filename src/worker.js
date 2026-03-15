@@ -3,9 +3,10 @@ import { connection } from "./queueSetup.js";
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
-import mysql from "mysql2/promise"; // Using promises for cleaner async code here
+import mysql from "mysql2/promise";
 
-// 1. Setup DB for the worker
+// ── DB ────────────────────────────────────────────────────────────────────────
+
 const db = await mysql.createConnection({
   host: "localhost",
   user: "dashuser",
@@ -15,76 +16,70 @@ const db = await mysql.createConnection({
 
 const compressedDir = path.join(process.cwd(), "compressed");
 
-// Resolutions & CRF values for VP9
-const resolutions = [720, 480, 360];
-const crfs = { 720: 32, 480: 34, 360: 36 }; // higher CRF → smaller file
+// ── Compression ───────────────────────────────────────────────────────────────
 
-// (Paste your existing compressVideoVP9 function here)
-// Compress a video using VP9 + Opus with CRF + show real-time logs
+const resolutions = [720, 480, 360];
+const crfs = { 720: 32, 480: 34, 360: 36 };
+
 function compressVideoVP9(inputPath) {
   return new Promise((resolve, reject) => {
     const versions = [];
-
     let chain = Promise.resolve();
 
     resolutions.forEach((res) => {
-      chain = chain.then(() => {
-        return new Promise((resPromise, rejPromise) => {
-          const outputFilename = `${Date.now()}-${res}p.webm`;
-          const outputPath = path.join(compressedDir, outputFilename);
+      chain = chain.then(
+        () =>
+          new Promise((resPromise, rejPromise) => {
+            const outputFilename = `${Date.now()}-${res}p.webm`;
+            const outputPath = path.join(compressedDir, outputFilename);
 
-          const args = [
-            "-y",
-            "-i",
-            inputPath,
-            "-c:v",
-            "libvpx-vp9",
-            "-crf",
-            crfs[res],
-            "-b:v",
-            "0", // CRF mode requires -b:v 0
-            "-vf",
-            `scale=-2:${res}`,
-            "-c:a",
-            "libopus",
-            "-b:a",
-            "64k", // reduce audio bitrate to save size
-            outputPath,
-          ];
+            const args = [
+              "-y",
+              "-i",
+              inputPath,
+              "-c:v",
+              "libvpx-vp9",
+              "-crf",
+              crfs[res],
+              "-b:v",
+              "0",
+              "-vf",
+              `scale=-2:${res}`,
+              "-c:a",
+              "libopus",
+              "-b:a",
+              "64k",
+              outputPath,
+            ];
 
-          const ffmpeg = spawn("ffmpeg", args);
+            const ffmpeg = spawn("ffmpeg", args);
 
-          ffmpeg.stdout.on("data", (data) => {
-            console.log(`FFmpeg stdout [${res}p]: ${data.toString()}`);
-          });
+            ffmpeg.stderr.on("data", (data) => {
+              console.log(`FFmpeg [${res}p]: ${data.toString()}`);
+            });
 
-          ffmpeg.stderr.on("data", (data) => {
-            console.log(`FFmpeg log [${res}p]: ${data.toString()}`);
-          });
+            ffmpeg.on("close", (code) => {
+              if (code === 0) {
+                versions.push({
+                  resolution: res,
+                  filename: outputFilename,
+                  path: outputPath,
+                });
+                resPromise();
+              } else {
+                rejPromise(
+                  new Error(`FFmpeg exited with code ${code} for ${res}p`),
+                );
+              }
+            });
 
-          ffmpeg.on("close", (code) => {
-            if (code === 0) {
-              versions.push({
-                resolution: res,
-                filename: outputFilename,
-                path: outputPath,
-              });
-              resPromise();
-            } else {
-              rejPromise(
-                new Error(`FFmpeg exited with code ${code} for ${res}p`),
-              );
-            }
-          });
-
-          ffmpeg.on("error", (err) => rejPromise(err));
-        });
-      });
+            ffmpeg.on("error", (err) => rejPromise(err));
+          }),
+      );
     });
 
     chain
       .then(() => {
-        // Delete original uploaded file
         fs.unlink(inputPath, () => {});
         resolve(versions);
       })
@@ -94,42 +89,67 @@ function compressVideoVP9(inputPath) {
       });
   });
 }
-// function compressVideoVP9(inputPath) { ... }
 
-// 2. Initialize the Worker
+// ── Worker ────────────────────────────────────────────────────────────────────
+
 const worker = new Worker(
   "video-compression",
   async (job) => {
-    console.log(
-      `[Job ${job.id}] Picked up video ${job.data.videoId} for compression...`,
-    );
+    console.log(`[Job ${job.id}] Processing video ${job.data.videoId}…`);
 
-    try {
-      // Run the heavy FFmpeg process
-      const versions = await compressVideoVP9(job.data.inputPath);
+    const versions = await compressVideoVP9(job.data.inputPath);
 
-      // Save the generated versions to the database
-      for (const v of versions) {
-        await db.query(
-          "INSERT INTO video_versions (video_id, filename, path, resolution) VALUES (?, ?, ?, ?)",
-          [job.data.videoId, v.filename, v.path, v.resolution],
-        );
-      }
-
-      console.log(
-        `[Job ${job.id}] Successfully compressed video ${job.data.videoId}`,
+    for (const v of versions) {
+      await db.query(
+        "INSERT INTO video_versions (video_id, filename, resolution) VALUES (?, ?, ?)",
+        [job.data.videoId, v.filename, v.resolution],
       );
-      return versions;
-    } catch (error) {
-      console.error(`[Job ${job.id}] Failed:`, error);
-      throw error; // Let BullMQ know this job failed so it can retry if configured
     }
+
+    console.log(`[Job ${job.id}] Done — ${versions.length} versions saved.`);
+    return versions;
   },
-  { connection },
+  {
+    connection,
+    // Don't pick up more than 1 job at a time — FFmpeg is already maxing CPU
+    concurrency: 1,
+  },
 );
 
 worker.on("failed", (job, err) => {
-  console.error(`Job ${job.id} failed with error ${err.message}`);
+  console.error(
+    `[Job ${job.id}] Failed (attempt ${job.attemptsMade}): ${err.message}`,
+  );
 });
 
-console.log("Worker is running and listening for jobs...");
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// When the process receives SIGTERM or SIGINT (Ctrl+C, Docker stop, PM2 reload):
+// 1. Stop accepting new jobs immediately
+// 2. Wait for any in-progress job to finish (or be re-queued by BullMQ)
+// 3. Close the DB connection cleanly
+// Without this, an in-progress FFmpeg encode gets orphaned: the partial .webm
+// sits on disk, the job stays "active" in Redis forever, and it never retries.
+
+async function shutdown(signal) {
+  console.log(`\n${signal} received — shutting down worker gracefully…`);
+
+  try {
+    // worker.close() waits for the current job to complete before stopping.
+    // Pass `true` to force-close immediately if you'd rather re-queue.
+    await worker.close();
+    console.log("Worker closed.");
+
+    await db.end();
+    console.log("DB connection closed.");
+
+    process.exit(0);
+  } catch (err) {
+    console.error("Error during shutdown:", err);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+console.log("Worker running — listening for jobs…");
