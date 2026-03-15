@@ -14,40 +14,113 @@ const db = await mysql.createConnection({
 
 const compressedDir = path.join(process.cwd(), "compressed");
 
-const resolutions = [720, 480, 360];
-const crfs = { 720: 32, 480: 34, 360: 36 };
+// ── HLS config ────────────────────────────────────────────────────────────────
+//
+// For each rendition we pass FFmpeg a set of video/audio encoding params.
+// HLS_SEGMENT_DURATION controls how many seconds each .ts chunk covers —
+// 4s is a good balance between seek accuracy and request overhead.
+//
+// Why H.264 + AAC for HLS instead of VP9 + Opus?
+// H.264 is natively supported by every browser, iOS, and Android without
+// a JS decoder. VP9 requires hls.js to use MSE which in turn requires
+// software decode on many devices. For a portfolio project you want maximum
+// compatibility and zero "it won't play on my phone" moments.
 
-// Compresses one resolution, parsing FFmpeg stderr for real-time progress.
-// progressBase = overall % before this resolution starts (0, 33, 66)
-// progressStep = how much this resolution contributes to overall (33)
-function compressOneResolution(
+const HLS_SEGMENT_DURATION = 4;
+
+const RENDITIONS = [
+  // { label, height, videoBitrate, audioBitrate, crf }
+  // Lower CRF = better quality. 23 is visually transparent for 720p.
+  {
+    label: "720p",
+    height: 720,
+    videoBitrate: "2800k",
+    audioBitrate: "128k",
+    crf: 23,
+  },
+  {
+    label: "480p",
+    height: 480,
+    videoBitrate: "1400k",
+    audioBitrate: "96k",
+    crf: 25,
+  },
+  {
+    label: "360p",
+    height: 360,
+    videoBitrate: "800k",
+    audioBitrate: "64k",
+    crf: 28,
+  },
+];
+
+// ── Encode one rendition to HLS ───────────────────────────────────────────────
+//
+// Produces:
+//   <outputDir>/<label>.m3u8        — rendition playlist
+//   <outputDir>/<label>_seg%03d.ts  — numbered segment files
+//
+// Progress is reported as a fraction of this rendition's share of the overall
+// job. progressBase and progressStep come from the caller.
+
+function encodeRendition(
   inputPath,
-  res,
+  outputDir,
+  rendition,
   job,
   progressBase,
   progressStep,
 ) {
   return new Promise((resolve, reject) => {
-    const outputFilename = `${Date.now()}-${res}p.webm`;
-    const outputPath = path.join(compressedDir, outputFilename);
+    const { label, height, videoBitrate, audioBitrate, crf } = rendition;
+
+    const playlistPath = path.join(outputDir, `${label}.m3u8`);
+    const segmentPattern = path.join(outputDir, `${label}_seg%03d.ts`);
 
     const args = [
       "-y",
       "-i",
       inputPath,
+
+      // Video: H.264, constrained by both CRF quality floor and a peak bitrate cap
       "-c:v",
-      "libvpx-vp9",
+      "libx264",
       "-crf",
-      crfs[res],
-      "-b:v",
-      "0",
+      String(crf),
+      "-maxrate",
+      videoBitrate,
+      "-bufsize",
+      videoBitrate, // VBV buffer = 1× maxrate is standard
       "-vf",
-      `scale=-2:${res}`,
+      `scale=-2:${height}`,
+      "-preset",
+      "fast", // fast = good speed/compression tradeoff
+      "-profile:v",
+      "main", // broadest device compatibility
+      "-level",
+      "3.1",
+
+      // Audio: AAC stereo
       "-c:a",
-      "libopus",
+      "aac",
       "-b:a",
-      "64k",
-      outputPath,
+      audioBitrate,
+      "-ac",
+      "2",
+
+      // HLS muxer options
+      "-f",
+      "hls",
+      "-hls_time",
+      String(HLS_SEGMENT_DURATION),
+      "-hls_playlist_type",
+      "vod", // VOD = all segments listed upfront
+      "-hls_segment_filename",
+      segmentPattern,
+      "-hls_flags",
+      "independent_segments", // each segment decodable on its own
+
+      playlistPath,
     ];
 
     let durationSecs = null;
@@ -56,7 +129,6 @@ function compressOneResolution(
     ffmpeg.stderr.on("data", (data) => {
       const text = data.toString();
 
-      // Grab total duration once from the header block
       if (durationSecs === null) {
         const m = text.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
         if (m) {
@@ -65,34 +137,54 @@ function compressOneResolution(
         }
       }
 
-      // Map current encode time → overall job progress
       if (durationSecs) {
         const m = text.match(/time=(\d+):(\d+):([\d.]+)/);
         if (m) {
-          const currentSecs =
+          const current =
             parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
-          const fraction = Math.min(currentSecs / durationSecs, 1);
+          const fraction = Math.min(current / durationSecs, 1);
           const overall = Math.round(progressBase + fraction * progressStep);
-          // Fire-and-forget — don't let a Redis hiccup fail the encode
           job.updateProgress(overall).catch(() => {});
         }
       }
     });
 
     ffmpeg.on("close", (code) => {
-      if (code === 0) {
-        resolve({
-          resolution: res,
-          filename: outputFilename,
-          path: outputPath,
-        });
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code} for ${res}p`));
-      }
+      if (code === 0) resolve(playlistPath);
+      else reject(new Error(`FFmpeg exited with code ${code} for ${label}`));
     });
 
     ffmpeg.on("error", (err) => reject(err));
   });
+}
+
+// ── Build master playlist ─────────────────────────────────────────────────────
+//
+// The master playlist tells hls.js about all available renditions.
+// Browsers use the BANDWIDTH hint to pick the right one automatically.
+// URI paths are relative so they work regardless of where the server
+// serves the files from.
+
+function writeMasterPlaylist(outputDir) {
+  const lines = ["#EXTM3U", "#EXT-X-VERSION:3", ""];
+
+  RENDITIONS.forEach(({ label, height, videoBitrate, audioBitrate }) => {
+    // Convert bitrate strings like "2800k" to numeric bytes/sec for the manifest
+    const vbps = parseInt(videoBitrate) * 1000;
+    const abps = parseInt(audioBitrate) * 1000;
+    const bandwidth = vbps + abps;
+    const resolution = `${Math.round((height * 16) / 9)}x${height}`; // 16:9 assumption
+
+    lines.push(
+      `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution}`,
+    );
+    lines.push(`${label}.m3u8`);
+    lines.push("");
+  });
+
+  const masterPath = path.join(outputDir, "master.m3u8");
+  fs.writeFileSync(masterPath, lines.join("\n"));
+  return masterPath;
 }
 
 // ── Worker ────────────────────────────────────────────────────────────────────
@@ -100,44 +192,50 @@ function compressOneResolution(
 const worker = new Worker(
   "video-compression",
   async (job) => {
-    console.log(`[Job ${job.id}] Processing video ${job.data.videoId}…`);
+    const { videoId, inputPath } = job.data;
+    console.log(`[Job ${job.id}] Processing video ${videoId}…`);
 
     await job.updateProgress(0);
 
-    const versions = [];
-    const stepSize = Math.floor(100 / resolutions.length); // 33 each
+    // Each video gets its own output directory: compressed/<videoId>/
+    const outputDir = path.join(compressedDir, String(videoId));
+    fs.mkdirSync(outputDir, { recursive: true });
 
-    for (let i = 0; i < resolutions.length; i++) {
-      const res = resolutions[i];
+    const stepSize = Math.floor(100 / RENDITIONS.length); // 33 per rendition
+
+    for (let i = 0; i < RENDITIONS.length; i++) {
+      const rendition = RENDITIONS[i];
       const progressBase = i * stepSize;
 
-      console.log(`[Job ${job.id}] Encoding ${res}p (base ${progressBase}%)…`);
-
-      const version = await compressOneResolution(
-        job.data.inputPath,
-        res,
+      console.log(`[Job ${job.id}] Encoding ${rendition.label}…`);
+      await encodeRendition(
+        inputPath,
+        outputDir,
+        rendition,
         job,
         progressBase,
         stepSize,
       );
-      versions.push(version);
 
-      // Snap to a clean milestone once each resolution finishes
-      await job.updateProgress(progressBase + stepSize);
+      await job.updateProgress(progressBase + stepSize); // snap to milestone
     }
 
-    for (const v of versions) {
-      await db.query(
-        "INSERT INTO video_versions (video_id, filename, resolution) VALUES (?, ?, ?)",
-        [job.data.videoId, v.filename, v.resolution],
-      );
-    }
+    // Write the master playlist that references all three rendition playlists
+    const masterPath = writeMasterPlaylist(outputDir);
 
-    fs.unlink(job.data.inputPath, () => {});
+    // Store the relative path (relative to compressedDir) in the DB
+    const relativeMasterPath = path.relative(compressedDir, masterPath);
+
+    await db.query(
+      "INSERT INTO video_versions (video_id, master_path) VALUES (?, ?)",
+      [videoId, relativeMasterPath],
+    );
+
+    fs.unlink(inputPath, () => {});
     await job.updateProgress(100);
 
-    console.log(`[Job ${job.id}] Done.`);
-    return versions;
+    console.log(`[Job ${job.id}] Done. HLS output: ${outputDir}`);
+    return { masterPath: relativeMasterPath };
   },
   { connection, concurrency: 1 },
 );

@@ -1,7 +1,33 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { io } from "socket.io-client";
 
-const socket = io("http://localhost:5000");
+const API = "http://localhost:5000";
+const socket = io(API);
+
+// ── Auth helpers ──────────────────────────────────────────────────────────────
+
+function getToken() {
+  return localStorage.getItem("token");
+}
+function saveToken(t) {
+  localStorage.setItem("token", t);
+}
+function clearToken() {
+  localStorage.removeItem("token");
+}
+
+// Wraps fetch to always send the JWT and handle 401 globally
+async function apiFetch(path, options = {}) {
+  const token = getToken();
+  const res = await fetch(`${API}${path}`, {
+    ...options,
+    headers: {
+      ...(options.headers ?? {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  return res;
+}
 
 // ── Toast system ──────────────────────────────────────────────────────────────
 
@@ -9,17 +35,15 @@ let toastId = 0;
 
 function useToasts() {
   const [toasts, setToasts] = useState([]);
-
   const add = useCallback((type, title, message) => {
     const id = ++toastId;
-    setToasts((prev) => [...prev, { id, type, title, message }]);
-    setTimeout(() => remove(id), 5000);
+    setToasts((p) => [...p, { id, type, title, message }]);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 5000);
   }, []);
-
-  const remove = useCallback((id) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
+  const remove = useCallback(
+    (id) => setToasts((p) => p.filter((t) => t.id !== id)),
+    [],
+  );
   return { toasts, add, remove };
 }
 
@@ -152,7 +176,7 @@ function ToastContainer({ toasts, remove }) {
   );
 }
 
-// ── Reusable progress bar ─────────────────────────────────────────────────────
+// ── Progress bar ──────────────────────────────────────────────────────────────
 
 function ProgressBar({ value, color = "#3b82f6", label, sublabel }) {
   return (
@@ -190,7 +214,7 @@ function ProgressBar({ value, color = "#3b82f6", label, sublabel }) {
             borderRadius: 999,
             background: color,
             width: `${value}%`,
-            transition: "width 0.35s cubic-bezier(0.4, 0, 0.2, 1)",
+            transition: "width 0.35s cubic-bezier(0.4,0,0.2,1)",
           }}
         />
       </div>
@@ -198,9 +222,7 @@ function ProgressBar({ value, color = "#3b82f6", label, sublabel }) {
   );
 }
 
-// ── Active jobs panel (bottom-right, one card per in-progress job) ────────────
-
-const RESOLUTIONS = ["720p", "480p", "360p"];
+// ── Active jobs panel ─────────────────────────────────────────────────────────
 
 function ActiveJobsPanel({ jobs }) {
   if (Object.keys(jobs).length === 0) return null;
@@ -229,7 +251,6 @@ function ActiveJobsPanel({ jobs }) {
             animation: "slideUp 0.25s cubic-bezier(.22,.68,0,1.2) forwards",
           }}
         >
-          {/* Header */}
           <div
             style={{
               display: "flex",
@@ -270,19 +291,15 @@ function ActiveJobsPanel({ jobs }) {
               #{jobId}
             </span>
           </div>
-
           <ProgressBar
             value={job.progress}
             color="#3b82f6"
-            label="Compressing"
+            label="Encoding HLS"
             sublabel={`${job.progress}%`}
           />
-
-          {/* Resolution milestone pills */}
           <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-            {RESOLUTIONS.map((r, i) => {
-              const milestone = (i + 1) * 33;
-              const done = job.progress >= milestone;
+            {["720p", "480p", "360p"].map((r, i) => {
+              const done = job.progress >= (i + 1) * 33;
               const active = job.progress >= i * 33 && !done;
               return (
                 <div
@@ -347,7 +364,6 @@ function FileThumbnail({ file, onClear }) {
   }, [file]);
 
   if (!file) return null;
-
   const fmt = (s) =>
     `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
   const fmtSize = (b) =>
@@ -460,54 +476,384 @@ function FileThumbnail({ file, onClear }) {
   );
 }
 
+// ── HLS Player ────────────────────────────────────────────────────────────────
+
+function HlsPlayer({ hlsUrl, title }) {
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
+  const [levels, setLevels] = useState([]);
+  const [currentLevel, setCurrentLevel] = useState(-1);
+  const [autoLevel, setAutoLevel] = useState(-1);
+
+  useEffect(() => {
+    if (!hlsUrl || !videoRef.current) return;
+
+    function initHls(Hls) {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          startLevel: -1,
+          abrEwmaDefaultEstimate: 500_000,
+        });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(videoRef.current);
+        hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+          setLevels(
+            [
+              ...data.levels.map((l, i) => ({
+                index: i,
+                height: l.height,
+                label: `${l.height}p`,
+              })),
+            ].sort((a, b) => b.height - a.height),
+          );
+          setCurrentLevel(-1);
+        });
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) =>
+          setAutoLevel(data.level),
+        );
+        hlsRef.current = hls;
+      } else if (
+        videoRef.current.canPlayType("application/vnd.apple.mpegurl")
+      ) {
+        videoRef.current.src = hlsUrl;
+      }
+    }
+
+    if (window.Hls) {
+      initHls(window.Hls);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js";
+    script.onload = () => initHls(window.Hls);
+    document.head.appendChild(script);
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [hlsUrl]);
+
+  const handleQualityChange = (e) => {
+    const level = parseInt(e.target.value);
+    setCurrentLevel(level);
+    if (hlsRef.current) hlsRef.current.currentLevel = level;
+  };
+
+  const displayLabel =
+    levels.find(
+      (l) => l.index === (currentLevel === -1 ? autoLevel : currentLevel),
+    )?.label ?? "…";
+
+  return (
+    <div style={{ marginTop: 36 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 12,
+        }}
+      >
+        <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>{title}</h3>
+        {levels.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {currentLevel === -1 && (
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  padding: "2px 7px",
+                  background: "#dbeafe",
+                  color: "#1d4ed8",
+                  borderRadius: 4,
+                }}
+              >
+                Auto · {displayLabel}
+              </span>
+            )}
+            <label style={{ fontSize: 13, color: "#64748b" }}>Quality</label>
+            <select
+              value={currentLevel}
+              onChange={handleQualityChange}
+              style={{
+                padding: "5px 10px",
+                border: "1px solid #e2e8f0",
+                borderRadius: 7,
+                fontSize: 13,
+                background: "#fff",
+                color: "#1e293b",
+              }}
+            >
+              <option value={-1}>Auto</option>
+              {levels.map((l) => (
+                <option key={l.index} value={l.index}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+      <video
+        ref={videoRef}
+        controls
+        style={{
+          width: "100%",
+          borderRadius: 12,
+          background: "#000",
+          display: "block",
+          boxShadow: "0 4px 24px rgba(0,0,0,0.12)",
+        }}
+      />
+    </div>
+  );
+}
+
+// ── Login page ────────────────────────────────────────────────────────────────
+
+function LoginPage({ onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Login failed");
+        return;
+      }
+      saveToken(data.token);
+      onLogin(data.user);
+    } catch {
+      setError("Could not reach the server.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#f8fafc",
+      }}
+    >
+      <div
+        style={{
+          width: 360,
+          background: "#fff",
+          borderRadius: 16,
+          padding: 36,
+          boxShadow: "0 4px 32px rgba(0,0,0,0.08)",
+          border: "1px solid #e2e8f0",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: 22,
+            fontWeight: 700,
+            margin: "0 0 4px",
+            letterSpacing: "-0.3px",
+          }}
+        >
+          Sign in
+        </h1>
+        <p style={{ fontSize: 13.5, color: "#64748b", margin: "0 0 28px" }}>
+          Teacher &amp; Student Portal
+        </p>
+
+        <form
+          onSubmit={handleSubmit}
+          style={{ display: "flex", flexDirection: "column", gap: 14 }}
+        >
+          <div>
+            <label
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: "#374151",
+                display: "block",
+                marginBottom: 5,
+              }}
+            >
+              Username
+            </label>
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoFocus
+              required
+              style={{
+                width: "100%",
+                padding: "9px 12px",
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                fontSize: 14,
+                color: "#1e293b",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+          <div>
+            <label
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: "#374151",
+                display: "block",
+                marginBottom: 5,
+              }}
+            >
+              Password
+            </label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              style={{
+                width: "100%",
+                padding: "9px 12px",
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                fontSize: 14,
+                color: "#1e293b",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
+
+          {error && (
+            <div
+              style={{
+                fontSize: 13,
+                color: "#dc2626",
+                background: "#fef2f2",
+                border: "1px solid #fca5a5",
+                borderRadius: 7,
+                padding: "8px 12px",
+              }}
+            >
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            style={{
+              padding: "10px",
+              background: loading ? "#d1d5db" : "#3b82f6",
+              color: "#fff",
+              border: "none",
+              borderRadius: 8,
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: loading ? "not-allowed" : "pointer",
+              transition: "background 0.15s",
+              marginTop: 4,
+            }}
+          >
+            {loading ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
+  // null = loading, false = not authed, object = user
+  const [user, setUser] = useState(null);
   const [file, setFile] = useState(null);
   const [videos, setVideos] = useState([]);
   const [selectedVideo, setSelectedVideo] = useState(null);
-  const [selectedResolution, setSelectedResolution] = useState(null);
-  const [uploadProgress, setUploadProgress] = useState(null); // null = idle
-  const [activeJobs, setActiveJobs] = useState({}); // { jobId: { filename, progress } }
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [activeJobs, setActiveJobs] = useState({});
   const { toasts, add: addToast, remove: removeToast } = useToasts();
 
-  const fetchVideos = async () => {
+  // On mount, validate any stored token so the user stays logged in on refresh
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      setUser(false);
+      return;
+    }
+
+    apiFetch("/auth/me")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then(({ user }) => setUser(user))
+      .catch(() => {
+        clearToken();
+        setUser(false);
+      });
+  }, []);
+
+  const fetchVideos = useCallback(async () => {
     try {
-      const res = await fetch("http://localhost:5000/videos");
+      const res = await apiFetch("/videos");
+      if (res.status === 401) {
+        handleLogout();
+        return;
+      }
       const data = await res.json();
       setVideos(Array.isArray(data) ? data : []);
     } catch {
       setVideos([]);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    if (!user) return;
     fetchVideos();
 
-    // Worker → Redis → server → here
     socket.on("video-progress", ({ jobId, progress }) => {
       setActiveJobs((prev) =>
         prev[jobId] ? { ...prev, [jobId]: { ...prev[jobId], progress } } : prev,
       );
     });
-
     socket.on("video-completed", ({ jobId }) => {
       addToast(
         "success",
         "Processing complete",
-        `Job #${jobId} — all resolutions ready.`,
+        `Job #${jobId} — HLS stream ready.`,
       );
-      // Linger at 100% briefly so the user sees it finish
-      setTimeout(() => {
-        setActiveJobs((prev) => {
-          const n = { ...prev };
-          delete n[jobId];
-          return n;
-        });
-      }, 1500);
+      setTimeout(
+        () =>
+          setActiveJobs((prev) => {
+            const n = { ...prev };
+            delete n[jobId];
+            return n;
+          }),
+        1500,
+      );
       fetchVideos();
     });
-
     socket.on("video-failed", ({ jobId, message }) => {
       addToast("error", "Processing failed", `Job #${jobId}: ${message}`);
       setActiveJobs((prev) => {
@@ -522,16 +868,23 @@ export default function App() {
       socket.off("video-completed");
       socket.off("video-failed");
     };
-  }, []);
+  }, [user, fetchVideos]);
 
-  // Use XHR instead of fetch — only XHR exposes upload progress events
+  const handleLogin = (u) => setUser(u);
+  const handleLogout = () => {
+    clearToken();
+    setUser(false);
+    setVideos([]);
+    setSelectedVideo(null);
+  };
+
+  // XHR upload with progress
   const handleUpload = (e) => {
     e.preventDefault();
     if (!file) return;
 
     const formData = new FormData();
     formData.append("video", file);
-
     const xhr = new XMLHttpRequest();
 
     xhr.upload.onprogress = (ev) => {
@@ -543,7 +896,6 @@ export default function App() {
       setUploadProgress(null);
       if (xhr.status === 202) {
         const data = JSON.parse(xhr.responseText);
-        // Register this job so its progress card appears
         setActiveJobs((prev) => ({
           ...prev,
           [data.jobId]: { filename: file.name, progress: 0 },
@@ -551,10 +903,13 @@ export default function App() {
         addToast(
           "info",
           "Upload complete",
-          `Compression queued — Job #${data.jobId}`,
+          `HLS encoding queued — Job #${data.jobId}`,
         );
         setFile(null);
         fetchVideos();
+      } else if (xhr.status === 401 || xhr.status === 403) {
+        addToast("error", "Session expired", "Please log in again.");
+        handleLogout();
       } else {
         const err = (() => {
           try {
@@ -569,28 +924,37 @@ export default function App() {
 
     xhr.onerror = () => {
       setUploadProgress(null);
-      addToast(
-        "error",
-        "Upload failed",
-        "Network error — check your connection.",
-      );
+      addToast("error", "Upload failed", "Network error.");
     };
-
-    xhr.open("POST", "http://localhost:5000/upload");
+    xhr.open("POST", `${API}/upload`);
+    xhr.setRequestHeader("Authorization", `Bearer ${getToken()}`);
     xhr.send(formData);
     setUploadProgress(0);
   };
 
-  const handleSelectVideo = (video) => {
-    setSelectedVideo(video);
-    setSelectedResolution(
-      [...video.versions].sort(
-        (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
-      )[0],
+  // ── Render ──
+
+  // Still validating stored token
+  if (user === null) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#f8fafc",
+        }}
+      >
+        <span style={{ fontSize: 14, color: "#94a3b8" }}>Loading…</span>
+      </div>
     );
-  };
+  }
+
+  if (user === false) return <LoginPage onLogin={handleLogin} />;
 
   const isUploading = uploadProgress !== null;
+  const isTeacher = user.role === "teacher";
 
   return (
     <>
@@ -603,7 +967,9 @@ export default function App() {
         .btn-blue:hover:not(:disabled)  { background:#2563eb !important; }
         .btn-green:hover:not(:disabled) { background:#15803d !important; }
         .btn-teal:hover  { background:#0f766e !important; }
+        .btn-ghost:hover { background:#f1f5f9 !important; }
         .video-item:hover{ border-color:#bfdbfe !important; background:#f8fafc !important; }
+        input:focus { border-color:#3b82f6 !important; box-shadow:0 0 0 3px rgba(59,130,246,0.12); }
       `}</style>
 
       <ToastContainer toasts={toasts} remove={removeToast} />
@@ -617,101 +983,155 @@ export default function App() {
           color: "#1e293b",
         }}
       >
-        <h1
-          style={{
-            fontSize: 26,
-            fontWeight: 700,
-            marginBottom: 4,
-            letterSpacing: "-0.3px",
-          }}
-        >
-          Teacher Upload Portal
-        </h1>
-        <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 32px" }}>
-          Upload a video — automatically compressed to 720p, 480p, and 360p.
-        </p>
-
-        {/* Upload card */}
+        {/* Header with user info + logout */}
         <div
           style={{
-            background: "#fff",
-            border: "1px solid #e2e8f0",
-            borderRadius: 12,
-            padding: 20,
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "space-between",
             marginBottom: 32,
-            boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
           }}
         >
-          <FileThumbnail file={file} onClear={() => setFile(null)} />
-
-          <form
-            onSubmit={handleUpload}
-            style={{ display: "flex", gap: 10, alignItems: "center" }}
-          >
-            <label
-              className="btn-blue"
+          <div>
+            <h1
               style={{
-                padding: "9px 18px",
-                background: "#3b82f6",
-                color: "#fff",
+                fontSize: 26,
+                fontWeight: 700,
+                margin: "0 0 4px",
+                letterSpacing: "-0.3px",
+              }}
+            >
+              {isTeacher ? "Teacher Upload Portal" : "Video Library"}
+            </h1>
+            <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
+              {isTeacher
+                ? "Upload a video — automatically encoded to HLS with adaptive streaming."
+                : "Browse and watch available videos."}
+            </p>
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              flexShrink: 0,
+              marginTop: 4,
+            }}
+          >
+            <div style={{ textAlign: "right" }}>
+              <div
+                style={{ fontSize: 13.5, fontWeight: 600, color: "#1e293b" }}
+              >
+                {user.username}
+              </div>
+              <div
+                style={{
+                  fontSize: 11.5,
+                  color: "#94a3b8",
+                  textTransform: "capitalize",
+                }}
+              >
+                {user.role}
+              </div>
+            </div>
+            <button
+              onClick={handleLogout}
+              className="btn-ghost"
+              style={{
+                padding: "7px 12px",
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
                 borderRadius: 8,
                 cursor: "pointer",
-                fontSize: 13.5,
-                fontWeight: 500,
-                transition: "background 0.15s",
-                flexShrink: 0,
-              }}
-            >
-              {file ? "Change file" : "Choose file"}
-              <input
-                type="file"
-                accept="video/*"
-                onChange={(e) => {
-                  if (e.target.files[0]) setFile(e.target.files[0]);
-                  e.target.value = "";
-                }}
-                style={{ display: "none" }}
-              />
-            </label>
-
-            {!file && (
-              <span style={{ fontSize: 13, color: "#94a3b8" }}>
-                No file selected
-              </span>
-            )}
-
-            <button
-              type="submit"
-              disabled={!file || isUploading}
-              className="btn-green"
-              style={{
-                marginLeft: "auto",
-                padding: "9px 22px",
-                background: !file || isUploading ? "#d1d5db" : "#16a34a",
-                color: "#fff",
-                border: "none",
-                borderRadius: 8,
-                cursor: !file || isUploading ? "not-allowed" : "pointer",
-                fontSize: 13.5,
-                fontWeight: 500,
+                fontSize: 13,
+                color: "#64748b",
                 transition: "background 0.15s",
               }}
             >
-              {isUploading ? `Uploading… ${uploadProgress}%` : "Upload"}
+              Sign out
             </button>
-          </form>
-
-          {isUploading && (
-            <div style={{ marginTop: 14 }}>
-              <ProgressBar
-                value={uploadProgress}
-                color="#16a34a"
-                label="Uploading to server"
-                sublabel={`${uploadProgress}%`}
-              />
-            </div>
-          )}
+          </div>
         </div>
+
+        {/* Upload card — teachers only */}
+        {isTeacher && (
+          <div
+            style={{
+              background: "#fff",
+              border: "1px solid #e2e8f0",
+              borderRadius: 12,
+              padding: 20,
+              marginBottom: 32,
+              boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
+            }}
+          >
+            <FileThumbnail file={file} onClear={() => setFile(null)} />
+            <form
+              onSubmit={handleUpload}
+              style={{ display: "flex", gap: 10, alignItems: "center" }}
+            >
+              <label
+                className="btn-blue"
+                style={{
+                  padding: "9px 18px",
+                  background: "#3b82f6",
+                  color: "#fff",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  fontSize: 13.5,
+                  fontWeight: 500,
+                  transition: "background 0.15s",
+                  flexShrink: 0,
+                }}
+              >
+                {file ? "Change file" : "Choose file"}
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={(e) => {
+                    if (e.target.files[0]) setFile(e.target.files[0]);
+                    e.target.value = "";
+                  }}
+                  style={{ display: "none" }}
+                />
+              </label>
+              {!file && (
+                <span style={{ fontSize: 13, color: "#94a3b8" }}>
+                  No file selected
+                </span>
+              )}
+              <button
+                type="submit"
+                disabled={!file || isUploading}
+                className="btn-green"
+                style={{
+                  marginLeft: "auto",
+                  padding: "9px 22px",
+                  background: !file || isUploading ? "#d1d5db" : "#16a34a",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 8,
+                  cursor: !file || isUploading ? "not-allowed" : "pointer",
+                  fontSize: 13.5,
+                  fontWeight: 500,
+                  transition: "background 0.15s",
+                }}
+              >
+                {isUploading ? `Uploading… ${uploadProgress}%` : "Upload"}
+              </button>
+            </form>
+            {isUploading && (
+              <div style={{ marginTop: 14 }}>
+                <ProgressBar
+                  value={uploadProgress}
+                  color="#16a34a"
+                  label="Uploading to server"
+                  sublabel={`${uploadProgress}%`}
+                />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Video list */}
         <div>
@@ -782,19 +1202,11 @@ export default function App() {
                     <div
                       style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}
                     >
-                      {vid.versions.length} version
-                      {vid.versions.length !== 1 ? "s" : ""} ·{" "}
-                      {[...vid.versions]
-                        .sort(
-                          (a, b) =>
-                            parseInt(b.resolution) - parseInt(a.resolution),
-                        )
-                        .map((v) => `${v.resolution}p`)
-                        .join(", ")}
+                      HLS · 720p / 480p / 360p · adaptive
                     </div>
                   </div>
                   <button
-                    onClick={() => handleSelectVideo(vid)}
+                    onClick={() => setSelectedVideo(vid)}
                     className="btn-blue"
                     style={{
                       padding: "7px 16px",
@@ -816,68 +1228,13 @@ export default function App() {
           )}
         </div>
 
-        {/* Player */}
-        {selectedVideo && selectedResolution && (
-          <div style={{ marginTop: 36 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 12,
-              }}
-            >
-              <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
-                {selectedVideo.original_filename}
-              </h3>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <label style={{ fontSize: 13, color: "#64748b" }}>
-                  Quality
-                </label>
-                <select
-                  value={selectedResolution.resolution}
-                  onChange={(e) =>
-                    setSelectedResolution(
-                      selectedVideo.versions.find(
-                        (v) => v.resolution === e.target.value,
-                      ),
-                    )
-                  }
-                  style={{
-                    padding: "5px 10px",
-                    border: "1px solid #e2e8f0",
-                    borderRadius: 7,
-                    fontSize: 13,
-                    background: "#fff",
-                    color: "#1e293b",
-                  }}
-                >
-                  {[...selectedVideo.versions]
-                    .sort(
-                      (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
-                    )
-                    .map((v) => (
-                      <option key={v.id} value={v.resolution}>
-                        {v.resolution}p
-                      </option>
-                    ))}
-                </select>
-              </div>
-            </div>
-            <video
-              key={selectedResolution.filename}
-              controls
-              style={{
-                width: "100%",
-                borderRadius: 12,
-                background: "#000",
-                display: "block",
-                boxShadow: "0 4px 24px rgba(0,0,0,0.12)",
-              }}
-              src={`http://localhost:5000/stream/${selectedResolution.filename}`}
-              type="video/webm"
-            />
-          </div>
+        {/* HLS Player */}
+        {selectedVideo && (
+          <HlsPlayer
+            key={selectedVideo.id}
+            hlsUrl={selectedVideo.hlsUrl}
+            title={selectedVideo.original_filename}
+          />
         )}
       </div>
     </>

@@ -7,12 +7,16 @@ import { Server } from "socket.io";
 import cors from "cors";
 import { videoQueue, queueEvents } from "./queueSetup.js";
 import http from "http";
+import { authRouter } from "./authRoutes.js";
+import { verifyToken, requireRole } from "./authMiddleware.js";
 
 const app = express();
 const server = http.createServer(app);
 const PORT = 5000;
 
 app.use(cors({ origin: "http://localhost:5173", methods: ["GET", "POST"] }));
+app.use(express.json());
+app.use("/auth", authRouter);
 
 const io = new Server(server, {
   cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] },
@@ -25,8 +29,6 @@ io.on("connection", (socket) => {
 // ── Queue event forwarding ────────────────────────────────────────────────────
 
 queueEvents.on("progress", ({ jobId, data: progress }) => {
-  // progress is whatever value was passed to job.updateProgress()
-  // We forward it straight to all connected clients
   io.emit("video-progress", { jobId, progress });
 });
 
@@ -60,9 +62,9 @@ function validateVideoMime(req, res, next) {
   const mime = req.file?.mimetype;
   if (!mime || !ALLOWED_MIME_TYPES.includes(mime)) {
     if (req.file?.path) fs.unlink(req.file.path, () => {});
-    return res.status(415).json({
-      error: `Unsupported file type: ${mime ?? "unknown"}.`,
-    });
+    return res
+      .status(415)
+      .json({ error: `Unsupported file type: ${mime ?? "unknown"}.` });
   }
   next();
 }
@@ -72,16 +74,46 @@ function handleUploadErrors(err, req, res, next) {
     if (err.code === "LIMIT_FILE_SIZE")
       return res
         .status(413)
-        .json({ error: "File too large. Maximum size is 500 MB." });
+        .json({ error: "File too large. Maximum is 500 MB." });
     return res.status(400).json({ error: `Upload error: ${err.message}` });
   }
   next(err);
 }
 
-// ── Setup ─────────────────────────────────────────────────────────────────────
+// ── Compressed dir + static serving ──────────────────────────────────────────
+//
+// HLS needs three things served as static files:
+//   1. master.m3u8      — top-level playlist hls.js fetches first
+//   2. <rendition>.m3u8 — per-quality playlist listing segment URLs
+//   3. <rendition>_seg*.ts — the actual video chunks
+//
+// express.static handles all three with correct Content-Type headers.
+// The URL structure is:  /hls/<videoId>/master.m3u8
+//                        /hls/<videoId>/720p.m3u8
+//                        /hls/<videoId>/720p_seg000.ts  etc.
+//
+// We also set the correct MIME types so hls.js doesn't reject the responses.
 
 const compressedDir = path.join(process.cwd(), "compressed");
 if (!fs.existsSync(compressedDir)) fs.mkdirSync(compressedDir);
+
+app.use(
+  "/hls",
+  (req, res, next) => {
+    // Set MIME types that hls.js requires
+    if (req.path.endsWith(".m3u8")) {
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    } else if (req.path.endsWith(".ts")) {
+      res.setHeader("Content-Type", "video/mp2t");
+    }
+    // Allow the React dev server to load HLS resources cross-origin
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    next();
+  },
+  express.static(compressedDir),
+);
+
+// ── MySQL ─────────────────────────────────────────────────────────────────────
 
 const db = mysql.createConnection({
   host: "localhost",
@@ -89,6 +121,7 @@ const db = mysql.createConnection({
   password: "mypassword",
   database: "vid",
 });
+
 db.connect((err) => {
   if (err) console.error("MySQL connection failed:", err);
   else console.log("Connected to MySQL");
@@ -98,6 +131,8 @@ db.connect((err) => {
 
 app.post(
   "/upload",
+  verifyToken, // 401 if no/invalid token
+  requireRole("teacher"), // 403 if role !== "teacher"
   (req, res, next) =>
     upload.single("video")(req, res, (err) => {
       if (err) return handleUploadErrors(err, req, res, next);
@@ -128,7 +163,7 @@ app.post(
           );
 
           res.status(202).json({
-            message: "Video uploaded. Compression queued.",
+            message: "Video uploaded. HLS compression queued.",
             jobId: job.id,
             videoId,
           });
@@ -141,14 +176,18 @@ app.post(
   },
 );
 
-app.get("/videos", (req, res) => {
+// Returns videos with their HLS master playlist URL ready for hls.js
+app.get("/videos", verifyToken, (req, res) => {
   const sql = `
-    SELECT v.id as video_id, v.original_filename,
-           vv.id as version_id, vv.filename, vv.resolution
+    SELECT
+      v.id           AS video_id,
+      v.original_filename,
+      vv.master_path
     FROM videos v
     JOIN video_versions vv ON v.id = vv.video_id
     ORDER BY v.uploaded_at DESC
   `;
+
   db.query(sql, (err, results) => {
     if (err) {
       if (err.code === "ER_NO_SUCH_TABLE") return res.json([]);
@@ -156,54 +195,19 @@ app.get("/videos", (req, res) => {
         .status(500)
         .json({ error: "Database error", details: err.message });
     }
-    const grouped = results.reduce((acc, v) => {
-      if (!acc[v.video_id]) {
-        acc[v.video_id] = {
-          id: v.video_id,
-          original_filename: v.original_filename,
-          versions: [],
-        };
-      }
-      acc[v.video_id].versions.push({
-        id: v.version_id,
-        filename: v.filename,
-        resolution: v.resolution,
-      });
-      return acc;
-    }, {});
-    res.json(Object.values(grouped));
+
+    // master_path is stored as e.g. "1/master.m3u8"
+    // We expose a full URL the frontend can pass directly to hls.js
+    const videos = results.map((row) => ({
+      id: row.video_id,
+      original_filename: row.original_filename,
+      // hls.js will fetch: GET /hls/1/master.m3u8
+      hlsUrl: `http://localhost:${PORT}/hls/${row.master_path}`,
+    }));
+
+    res.json(videos);
   });
 });
-
-app.get("/stream/:filename", (req, res) => {
-  const videoPath = path.join(compressedDir, req.params.filename);
-  if (!fs.existsSync(videoPath)) return res.status(404).send("Video not found");
-
-  const stat = fs.statSync(videoPath);
-  const fileSize = stat.size;
-  const range = req.headers.range;
-
-  if (range) {
-    const [startStr, endStr] = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(startStr, 10);
-    const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
-    res.writeHead(206, {
-      "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-      "Accept-Ranges": "bytes",
-      "Content-Length": end - start + 1,
-      "Content-Type": "video/webm",
-    });
-    fs.createReadStream(videoPath, { start, end }).pipe(res);
-  } else {
-    res.writeHead(200, {
-      "Content-Length": fileSize,
-      "Content-Type": "video/webm",
-    });
-    fs.createReadStream(videoPath).pipe(res);
-  }
-});
-
-app.use("/videos/static", express.static(compressedDir));
 
 server.listen(PORT, () =>
   console.log(`Server running on http://localhost:${PORT}`),
