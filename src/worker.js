@@ -5,8 +5,6 @@ import fs from "fs";
 import path from "path";
 import mysql from "mysql2/promise";
 
-// ── DB ────────────────────────────────────────────────────────────────────────
-
 const db = await mysql.createConnection({
   host: "localhost",
   user: "dashuser",
@@ -16,77 +14,84 @@ const db = await mysql.createConnection({
 
 const compressedDir = path.join(process.cwd(), "compressed");
 
-// ── Compression ───────────────────────────────────────────────────────────────
-
 const resolutions = [720, 480, 360];
 const crfs = { 720: 32, 480: 34, 360: 36 };
 
-function compressVideoVP9(inputPath) {
+// Compresses one resolution, parsing FFmpeg stderr for real-time progress.
+// progressBase = overall % before this resolution starts (0, 33, 66)
+// progressStep = how much this resolution contributes to overall (33)
+function compressOneResolution(
+  inputPath,
+  res,
+  job,
+  progressBase,
+  progressStep,
+) {
   return new Promise((resolve, reject) => {
-    const versions = [];
-    let chain = Promise.resolve();
+    const outputFilename = `${Date.now()}-${res}p.webm`;
+    const outputPath = path.join(compressedDir, outputFilename);
 
-    resolutions.forEach((res) => {
-      chain = chain.then(
-        () =>
-          new Promise((resPromise, rejPromise) => {
-            const outputFilename = `${Date.now()}-${res}p.webm`;
-            const outputPath = path.join(compressedDir, outputFilename);
+    const args = [
+      "-y",
+      "-i",
+      inputPath,
+      "-c:v",
+      "libvpx-vp9",
+      "-crf",
+      crfs[res],
+      "-b:v",
+      "0",
+      "-vf",
+      `scale=-2:${res}`,
+      "-c:a",
+      "libopus",
+      "-b:a",
+      "64k",
+      outputPath,
+    ];
 
-            const args = [
-              "-y",
-              "-i",
-              inputPath,
-              "-c:v",
-              "libvpx-vp9",
-              "-crf",
-              crfs[res],
-              "-b:v",
-              "0",
-              "-vf",
-              `scale=-2:${res}`,
-              "-c:a",
-              "libopus",
-              "-b:a",
-              "64k",
-              outputPath,
-            ];
+    let durationSecs = null;
+    const ffmpeg = spawn("ffmpeg", args);
 
-            const ffmpeg = spawn("ffmpeg", args);
+    ffmpeg.stderr.on("data", (data) => {
+      const text = data.toString();
 
-            ffmpeg.stderr.on("data", (data) => {
-              console.log(`FFmpeg [${res}p]: ${data.toString()}`);
-            });
+      // Grab total duration once from the header block
+      if (durationSecs === null) {
+        const m = text.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+        if (m) {
+          durationSecs =
+            parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+        }
+      }
 
-            ffmpeg.on("close", (code) => {
-              if (code === 0) {
-                versions.push({
-                  resolution: res,
-                  filename: outputFilename,
-                  path: outputPath,
-                });
-                resPromise();
-              } else {
-                rejPromise(
-                  new Error(`FFmpeg exited with code ${code} for ${res}p`),
-                );
-              }
-            });
-
-            ffmpeg.on("error", (err) => rejPromise(err));
-          }),
-      );
+      // Map current encode time → overall job progress
+      if (durationSecs) {
+        const m = text.match(/time=(\d+):(\d+):([\d.]+)/);
+        if (m) {
+          const currentSecs =
+            parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseFloat(m[3]);
+          const fraction = Math.min(currentSecs / durationSecs, 1);
+          const overall = Math.round(progressBase + fraction * progressStep);
+          // Fire-and-forget — don't let a Redis hiccup fail the encode
+          job.updateProgress(overall).catch(() => {});
+        }
+      }
     });
 
-    chain
-      .then(() => {
-        fs.unlink(inputPath, () => {});
-        resolve(versions);
-      })
-      .catch((err) => {
-        fs.unlink(inputPath, () => {});
-        reject(err);
-      });
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        resolve({
+          resolution: res,
+          filename: outputFilename,
+          path: outputPath,
+        });
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code} for ${res}p`));
+      }
+    });
+
+    ffmpeg.on("error", (err) => reject(err));
   });
 }
 
@@ -97,7 +102,29 @@ const worker = new Worker(
   async (job) => {
     console.log(`[Job ${job.id}] Processing video ${job.data.videoId}…`);
 
-    const versions = await compressVideoVP9(job.data.inputPath);
+    await job.updateProgress(0);
+
+    const versions = [];
+    const stepSize = Math.floor(100 / resolutions.length); // 33 each
+
+    for (let i = 0; i < resolutions.length; i++) {
+      const res = resolutions[i];
+      const progressBase = i * stepSize;
+
+      console.log(`[Job ${job.id}] Encoding ${res}p (base ${progressBase}%)…`);
+
+      const version = await compressOneResolution(
+        job.data.inputPath,
+        res,
+        job,
+        progressBase,
+        stepSize,
+      );
+      versions.push(version);
+
+      // Snap to a clean milestone once each resolution finishes
+      await job.updateProgress(progressBase + stepSize);
+    }
 
     for (const v of versions) {
       await db.query(
@@ -106,14 +133,13 @@ const worker = new Worker(
       );
     }
 
-    console.log(`[Job ${job.id}] Done — ${versions.length} versions saved.`);
+    fs.unlink(job.data.inputPath, () => {});
+    await job.updateProgress(100);
+
+    console.log(`[Job ${job.id}] Done.`);
     return versions;
   },
-  {
-    connection,
-    // Don't pick up more than 1 job at a time — FFmpeg is already maxing CPU
-    concurrency: 1,
-  },
+  { connection, concurrency: 1 },
 );
 
 worker.on("failed", (job, err) => {
@@ -123,28 +149,15 @@ worker.on("failed", (job, err) => {
 });
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
-// When the process receives SIGTERM or SIGINT (Ctrl+C, Docker stop, PM2 reload):
-// 1. Stop accepting new jobs immediately
-// 2. Wait for any in-progress job to finish (or be re-queued by BullMQ)
-// 3. Close the DB connection cleanly
-// Without this, an in-progress FFmpeg encode gets orphaned: the partial .webm
-// sits on disk, the job stays "active" in Redis forever, and it never retries.
 
 async function shutdown(signal) {
   console.log(`\n${signal} received — shutting down worker gracefully…`);
-
   try {
-    // worker.close() waits for the current job to complete before stopping.
-    // Pass `true` to force-close immediately if you'd rather re-queue.
     await worker.close();
-    console.log("Worker closed.");
-
     await db.end();
-    console.log("DB connection closed.");
-
     process.exit(0);
   } catch (err) {
-    console.error("Error during shutdown:", err);
+    console.error("Shutdown error:", err);
     process.exit(1);
   }
 }

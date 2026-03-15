@@ -24,58 +24,64 @@ io.on("connection", (socket) => {
 
 // ── Queue event forwarding ────────────────────────────────────────────────────
 
+queueEvents.on("progress", ({ jobId, data: progress }) => {
+  // progress is whatever value was passed to job.updateProgress()
+  // We forward it straight to all connected clients
+  io.emit("video-progress", { jobId, progress });
+});
+
 queueEvents.on("completed", ({ jobId }) => {
   console.log(`Job ${jobId} completed.`);
-  io.emit("video-completed", {
-    message: "A new video has finished processing!",
-    jobId,
-  });
+  io.emit("video-completed", { jobId });
 });
 
 queueEvents.on("failed", ({ jobId, failedReason }) => {
   console.log(`Job ${jobId} failed: ${failedReason}`);
-  io.emit("video-failed", { message: failedReason, jobId });
+  io.emit("video-failed", { jobId, message: failedReason });
 });
 
-// ── Multer: 500 MB limit, temp storage ───────────────────────────────────────
+// ── Multer ────────────────────────────────────────────────────────────────────
 
 const upload = multer({
   dest: "uploads/",
-  limits: {
-    fileSize: 500 * 1024 * 1024, // 500 MB
-  },
+  limits: { fileSize: 500 * 1024 * 1024 },
 });
-
-// ── Upload validation middleware ──────────────────────────────────────────────
 
 const ALLOWED_MIME_TYPES = [
   "video/mp4",
   "video/webm",
   "video/quicktime",
-  "video/x-msvideo", // .avi
-  "video/x-matroska", // .mkv
+  "video/x-msvideo",
+  "video/x-matroska",
   "video/mpeg",
 ];
 
-// Checks MIME type reported by the client (fast, first line of defence)
 function validateVideoMime(req, res, next) {
   const mime = req.file?.mimetype;
   if (!mime || !ALLOWED_MIME_TYPES.includes(mime)) {
-    // Clean up the temp file multer already wrote
     if (req.file?.path) fs.unlink(req.file.path, () => {});
     return res.status(415).json({
-      error: `Unsupported file type: ${mime ?? "unknown"}. Allowed: mp4, webm, mov, avi, mkv, mpeg.`,
+      error: `Unsupported file type: ${mime ?? "unknown"}.`,
     });
   }
   next();
 }
 
-// ── Compressed directory ──────────────────────────────────────────────────────
+function handleUploadErrors(err, req, res, next) {
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE")
+      return res
+        .status(413)
+        .json({ error: "File too large. Maximum size is 500 MB." });
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+  next(err);
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
 
 const compressedDir = path.join(process.cwd(), "compressed");
 if (!fs.existsSync(compressedDir)) fs.mkdirSync(compressedDir);
-
-// ── MySQL ─────────────────────────────────────────────────────────────────────
 
 const db = mysql.createConnection({
   host: "localhost",
@@ -83,26 +89,12 @@ const db = mysql.createConnection({
   password: "mypassword",
   database: "vid",
 });
-
 db.connect((err) => {
   if (err) console.error("MySQL connection failed:", err);
   else console.log("Connected to MySQL");
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-
-// Handle multer's own errors (e.g. file too large) before they crash the server
-function handleUploadErrors(err, req, res, next) {
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      return res
-        .status(413)
-        .json({ error: "File too large. Maximum size is 500 MB." });
-    }
-    return res.status(400).json({ error: `Upload error: ${err.message}` });
-  }
-  next(err);
-}
 
 app.post(
   "/upload",
@@ -115,27 +107,23 @@ app.post(
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    try {
-      db.query(
-        "INSERT INTO videos (original_filename) VALUES (?)",
-        [req.file.originalname],
-        async (err, result) => {
-          if (err) return res.status(500).json({ error: "DB insert failed" });
+    db.query(
+      "INSERT INTO videos (original_filename) VALUES (?)",
+      [req.file.originalname],
+      async (err, result) => {
+        if (err) return res.status(500).json({ error: "DB insert failed" });
 
-          const videoId = result.insertId;
+        const videoId = result.insertId;
 
-          // Add job with retry config:
-          // - 3 attempts total
-          // - exponential backoff: 1s → 2s → 4s between retries
-          // - keep failed jobs for 7 days so you can inspect them
+        try {
           const job = await videoQueue.add(
             "compress-video",
             { videoId, inputPath: req.file.path },
             {
               attempts: 3,
               backoff: { type: "exponential", delay: 1000 },
-              removeOnComplete: { age: 7 * 24 * 3600 }, // keep completed for 7 days
-              removeOnFail: false, // keep failed jobs forever until manually cleared
+              removeOnComplete: { age: 7 * 24 * 3600 },
+              removeOnFail: false,
             },
           );
 
@@ -144,12 +132,12 @@ app.post(
             jobId: job.id,
             videoId,
           });
-        },
-      );
-    } catch (err) {
-      console.error("Queue error:", err);
-      res.status(500).json({ error: "Failed to queue video" });
-    }
+        } catch (err) {
+          console.error("Queue error:", err);
+          res.status(500).json({ error: "Failed to queue video" });
+        }
+      },
+    );
   },
 );
 
@@ -161,7 +149,6 @@ app.get("/videos", (req, res) => {
     JOIN video_versions vv ON v.id = vv.video_id
     ORDER BY v.uploaded_at DESC
   `;
-
   db.query(sql, (err, results) => {
     if (err) {
       if (err.code === "ER_NO_SUCH_TABLE") return res.json([]);
@@ -169,7 +156,6 @@ app.get("/videos", (req, res) => {
         .status(500)
         .json({ error: "Database error", details: err.message });
     }
-
     const grouped = results.reduce((acc, v) => {
       if (!acc[v.video_id]) {
         acc[v.video_id] = {
@@ -185,7 +171,6 @@ app.get("/videos", (req, res) => {
       });
       return acc;
     }, {});
-
     res.json(Object.values(grouped));
   });
 });
@@ -202,12 +187,10 @@ app.get("/stream/:filename", (req, res) => {
     const [startStr, endStr] = range.replace(/bytes=/, "").split("-");
     const start = parseInt(startStr, 10);
     const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
-    const chunkSize = end - start + 1;
-
     res.writeHead(206, {
       "Content-Range": `bytes ${start}-${end}/${fileSize}`,
       "Accept-Ranges": "bytes",
-      "Content-Length": chunkSize,
+      "Content-Length": end - start + 1,
       "Content-Type": "video/webm",
     });
     fs.createReadStream(videoPath, { start, end }).pipe(res);

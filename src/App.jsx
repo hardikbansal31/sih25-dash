@@ -1,217 +1,10 @@
-// import { useState, useEffect } from "react";
-// import { io } from "socket.io-client";
-
-// const socket = io("http://localhost:5000");
-
-// function App() {
-//   const [file, setFile] = useState(null);
-//   const [videos, setVideos] = useState([]);
-//   const [selectedVideo, setSelectedVideo] = useState(null);
-//   const [selectedResolution, setSelectedResolution] = useState(null);
-//   const [uploading, setUploading] = useState(false);
-
-//   // Fetch videos from server
-//   const fetchVideos = async () => {
-//     try {
-//       const res = await fetch("http://localhost:5000/videos");
-
-//       if (!res.ok) {
-//         throw new Error("Server error");
-//       }
-
-//       const data = await res.json();
-
-//       if (Array.isArray(data)) {
-//         setVideos(data);
-//       } else {
-//         setVideos([]);
-//       }
-//     } catch (err) {
-//       console.error("Error fetching videos:", err);
-//       setVideos([]); // prevent crash
-//     }
-//   };
-
-//   useEffect(() => {
-//     fetchVideos();
-
-//     // NEW: Listen for the success event from the server
-//     socket.on("video-completed", (data) => {
-//       alert(data.message); // In a real app, use a nice toast notification here!
-//       fetchVideos(); // Automatically refresh the list!
-//     });
-
-//     socket.on("video-failed", (data) => {
-//       alert(`Video processing failed for Job ${data.jobId}`);
-//     });
-
-//     // Cleanup listener when component unmounts
-//     return () => {
-//       socket.off("video-completed");
-//       socket.off("video-failed");
-//     };
-//   }, []);
-
-//   // Upload handler
-//   const handleUpload = async (e) => {
-//     e.preventDefault();
-//     if (!file) return alert("Please select a file");
-
-//     const formData = new FormData();
-//     formData.append("video", file);
-
-//     try {
-//       setUploading(true);
-//       const res = await fetch("http://localhost:5000/upload", {
-//         method: "POST",
-//         body: formData,
-//       });
-
-//       if (!res.ok) throw new Error("Upload failed");
-
-//       // We now get a Job ID back from the queue!
-//       const data = await res.json();
-//       alert(
-//         `Upload successful! Video is now processing in the background. (Job ID: ${data.jobId})`,
-//       );
-
-//       setFile(null);
-//       // We might want to fetch videos here, but the new video won't have its resolutions yet!
-//       fetchVideos();
-//     } catch (err) {
-//       console.error(err);
-//       alert("Error uploading");
-//     } finally {
-//       setUploading(false);
-//     }
-//   };
-
-//   // Handle video selection
-//   const handleSelectVideo = (video) => {
-//     setSelectedVideo(video);
-//     // Default to highest resolution
-//     const sortedRes = [...video.versions].sort(
-//       (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
-//     );
-//     setSelectedResolution(sortedRes[0]);
-//   };
-
-//   return (
-//     <div className="bg-white min-h-screen p-8 text-gray-800">
-//       <h1 className="text-3xl font-bold mb-6">Teacher Upload Portal</h1>
-
-//       {/* Upload Form */}
-//       <form onSubmit={handleUpload} className="flex items-center gap-4 mb-6">
-//         <label className="px-4 py-2 bg-blue-600 text-white rounded-md cursor-pointer hover:bg-blue-700 transition">
-//           Choose File
-//           <input
-//             type="file"
-//             onChange={(e) => setFile(e.target.files[0])}
-//             className="hidden"
-//           />
-//         </label>
-
-//         <button
-//           type="submit"
-//           disabled={!file || uploading}
-//           className={`px-5 py-2 rounded-md text-white transition ${
-//             !file
-//               ? "bg-gray-400 cursor-not-allowed"
-//               : "bg-green-600 hover:bg-green-700"
-//           }`}
-//         >
-//           {uploading ? "Uploading..." : "Upload"}
-//         </button>
-//       </form>
-
-//       <hr className="my-6" />
-
-//       {/* Video List */}
-//       <div>
-//         <div className="flex items-center justify-between mb-3">
-//           <h2 className="text-2xl font-semibold">Available Videos</h2>
-//           <button
-//             onClick={fetchVideos}
-//             className="px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 transition"
-//           >
-//             Refresh List
-//           </button>
-//         </div>
-
-//         {videos.length === 0 ? (
-//           <p className="text-gray-500">No videos uploaded yet.</p>
-//         ) : (
-//           <ul className="space-y-3">
-//             {videos.map((vid) => (
-//               <li
-//                 key={vid.id}
-//                 className="flex items-center justify-between p-3 border rounded-md shadow-sm"
-//               >
-//                 <span className="font-medium">{vid.original_filename}</span>
-//                 <button
-//                   onClick={() => handleSelectVideo(vid)}
-//                   className="px-3 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition"
-//                 >
-//                   Play
-//                 </button>
-//               </li>
-//             ))}
-//           </ul>
-//         )}
-//       </div>
-
-//       {/* Video Player */}
-//       {selectedVideo && selectedResolution && (
-//         <div className="mt-10">
-//           <h3 className="text-xl font-semibold mb-4">
-//             Now Playing: {selectedVideo.original_filename}
-//           </h3>
-
-//           {/* Resolution selector */}
-//           <div className="mb-4">
-//             <label className="mr-2 font-medium">Select Resolution:</label>
-//             <select
-//               value={selectedResolution.resolution}
-//               onChange={(e) =>
-//                 setSelectedResolution(
-//                   selectedVideo.versions.find(
-//                     (v) => v.resolution === e.target.value,
-//                   ),
-//                 )
-//               }
-//               className="px-3 py-2 border rounded-md"
-//             >
-//               {selectedVideo.versions
-//                 .sort((a, b) => parseInt(b.resolution) - parseInt(a.resolution))
-//                 .map((v) => (
-//                   <option key={v.id} value={v.resolution}>
-//                     {v.resolution}p
-//                   </option>
-//                 ))}
-//             </select>
-//           </div>
-
-//           <video
-//             width="800"
-//             controls
-//             className="border rounded-lg shadow-lg"
-//             src={`http://localhost:5000/stream/${selectedResolution.filename}`}
-//             type="video/webm"
-//           />
-//         </div>
-//       )}
-//     </div>
-//   );
-// }
-
-// export default App;
-
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { io } from "socket.io-client";
 
 const socket = io("http://localhost:5000");
 
 // ── Toast system ──────────────────────────────────────────────────────────────
+
 let toastId = 0;
 
 function useToasts() {
@@ -221,7 +14,6 @@ function useToasts() {
     const id = ++toastId;
     setToasts((prev) => [...prev, { id, type, title, message }]);
     setTimeout(() => remove(id), 5000);
-    return id;
   }, []);
 
   const remove = useCallback((id) => {
@@ -231,7 +23,7 @@ function useToasts() {
   return { toasts, add, remove };
 }
 
-const ICONS = {
+const TOAST_ICONS = {
   success: (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
       <circle cx="9" cy="9" r="8.25" stroke="currentColor" strokeWidth="1.5" />
@@ -311,7 +103,7 @@ function ToastContainer({ toasts, remove }) {
             }}
           >
             <span style={{ color: s.icon, marginTop: 1, flexShrink: 0 }}>
-              {ICONS[t.type]}
+              {TOAST_ICONS[t.type]}
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div
@@ -346,10 +138,9 @@ function ToastContainer({ toasts, remove }) {
                 color: s.text,
                 opacity: 0.5,
                 padding: 0,
-                fontSize: 16,
+                fontSize: 18,
                 lineHeight: 1,
                 flexShrink: 0,
-                marginTop: -1,
               }}
             >
               ×
@@ -361,35 +152,197 @@ function ToastContainer({ toasts, remove }) {
   );
 }
 
-// ── Thumbnail preview ─────────────────────────────────────────────────────────
+// ── Reusable progress bar ─────────────────────────────────────────────────────
+
+function ProgressBar({ value, color = "#3b82f6", label, sublabel }) {
+  return (
+    <div style={{ width: "100%" }}>
+      {(label || sublabel) && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 5,
+          }}
+        >
+          {label && (
+            <span style={{ fontSize: 12.5, fontWeight: 600, color: "#374151" }}>
+              {label}
+            </span>
+          )}
+          {sublabel && (
+            <span style={{ fontSize: 12, color: "#6b7280" }}>{sublabel}</span>
+          )}
+        </div>
+      )}
+      <div
+        style={{
+          width: "100%",
+          height: 6,
+          background: "#e5e7eb",
+          borderRadius: 999,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            height: "100%",
+            borderRadius: 999,
+            background: color,
+            width: `${value}%`,
+            transition: "width 0.35s cubic-bezier(0.4, 0, 0.2, 1)",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Active jobs panel (bottom-right, one card per in-progress job) ────────────
+
+const RESOLUTIONS = ["720p", "480p", "360p"];
+
+function ActiveJobsPanel({ jobs }) {
+  if (Object.keys(jobs).length === 0) return null;
+  return (
+    <div
+      style={{
+        position: "fixed",
+        bottom: 20,
+        right: 20,
+        zIndex: 9990,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        width: 300,
+      }}
+    >
+      {Object.entries(jobs).map(([jobId, job]) => (
+        <div
+          key={jobId}
+          style={{
+            background: "#fff",
+            border: "1px solid #e2e8f0",
+            borderRadius: 12,
+            padding: "14px 16px",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.10)",
+            animation: "slideUp 0.25s cubic-bezier(.22,.68,0,1.2) forwards",
+          }}
+        >
+          {/* Header */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 10,
+            }}
+          >
+            <svg
+              style={{ animation: "spin 1s linear infinite", flexShrink: 0 }}
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+            >
+              <circle cx="7" cy="7" r="5.5" stroke="#e5e7eb" strokeWidth="2" />
+              <path
+                d="M7 1.5A5.5 5.5 0 0 1 12.5 7"
+                stroke="#3b82f6"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+            </svg>
+            <span
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: "#1e293b",
+                flex: 1,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {job.filename}
+            </span>
+            <span style={{ fontSize: 11, color: "#6b7280", flexShrink: 0 }}>
+              #{jobId}
+            </span>
+          </div>
+
+          <ProgressBar
+            value={job.progress}
+            color="#3b82f6"
+            label="Compressing"
+            sublabel={`${job.progress}%`}
+          />
+
+          {/* Resolution milestone pills */}
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+            {RESOLUTIONS.map((r, i) => {
+              const milestone = (i + 1) * 33;
+              const done = job.progress >= milestone;
+              const active = job.progress >= i * 33 && !done;
+              return (
+                <div
+                  key={r}
+                  style={{
+                    flex: 1,
+                    textAlign: "center",
+                    fontSize: 11,
+                    padding: "3px 0",
+                    borderRadius: 6,
+                    background: done
+                      ? "#dbeafe"
+                      : active
+                        ? "#eff6ff"
+                        : "#f1f5f9",
+                    color: done ? "#1d4ed8" : active ? "#3b82f6" : "#94a3b8",
+                    fontWeight: done || active ? 600 : 400,
+                    transition: "all 0.3s",
+                  }}
+                >
+                  {r}
+                  {done && " ✓"}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── File thumbnail ────────────────────────────────────────────────────────────
+
 function FileThumbnail({ file, onClear }) {
   const [thumb, setThumb] = useState(null);
   const [duration, setDuration] = useState(null);
-  const videoRef = useRef(null);
 
   useEffect(() => {
-    if (!file) return;
+    if (!file) {
+      setThumb(null);
+      setDuration(null);
+      return;
+    }
     const url = URL.createObjectURL(file);
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.src = url;
-
-    video.onloadedmetadata = () => {
-      setDuration(video.duration);
-      video.currentTime = Math.min(1.5, video.duration * 0.1);
+    const vid = document.createElement("video");
+    vid.preload = "metadata";
+    vid.src = url;
+    vid.onloadedmetadata = () => {
+      setDuration(vid.duration);
+      vid.currentTime = Math.min(1.5, vid.duration * 0.1);
     };
-
-    video.onseeked = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = 320;
-      canvas.height =
-        Math.round((video.videoHeight / video.videoWidth) * 320) || 180;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      setThumb(canvas.toDataURL("image/jpeg", 0.85));
+    vid.onseeked = () => {
+      const c = document.createElement("canvas");
+      c.width = 320;
+      c.height = Math.round((vid.videoHeight / vid.videoWidth) * 320) || 180;
+      c.getContext("2d").drawImage(vid, 0, 0, c.width, c.height);
+      setThumb(c.toDataURL("image/jpeg", 0.85));
       URL.revokeObjectURL(url);
     };
-
     return () => URL.revokeObjectURL(url);
   }, [file]);
 
@@ -413,7 +366,6 @@ function FileThumbnail({ file, onClear }) {
         marginBottom: 12,
       }}
     >
-      {/* Thumbnail */}
       <div
         style={{
           width: 88,
@@ -471,8 +423,6 @@ function FileThumbnail({ file, onClear }) {
           </span>
         )}
       </div>
-
-      {/* Meta */}
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -491,8 +441,6 @@ function FileThumbnail({ file, onClear }) {
           {duration ? ` · ${fmt(duration)}` : ""}
         </div>
       </div>
-
-      {/* Clear */}
       <button
         onClick={onClear}
         style={{
@@ -505,7 +453,6 @@ function FileThumbnail({ file, onClear }) {
           lineHeight: 1,
           flexShrink: 0,
         }}
-        title="Remove"
       >
         ×
       </button>
@@ -514,22 +461,22 @@ function FileThumbnail({ file, onClear }) {
 }
 
 // ── Main App ──────────────────────────────────────────────────────────────────
-function App() {
+
+export default function App() {
   const [file, setFile] = useState(null);
   const [videos, setVideos] = useState([]);
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [selectedResolution, setSelectedResolution] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null); // null = idle
+  const [activeJobs, setActiveJobs] = useState({}); // { jobId: { filename, progress } }
   const { toasts, add: addToast, remove: removeToast } = useToasts();
 
   const fetchVideos = async () => {
     try {
       const res = await fetch("http://localhost:5000/videos");
-      if (!res.ok) throw new Error("Server error");
       const data = await res.json();
       setVideos(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error("Error fetching videos:", err);
+    } catch {
       setVideos([]);
     }
   };
@@ -537,87 +484,130 @@ function App() {
   useEffect(() => {
     fetchVideos();
 
-    socket.on("video-completed", (data) => {
+    // Worker → Redis → server → here
+    socket.on("video-progress", ({ jobId, progress }) => {
+      setActiveJobs((prev) =>
+        prev[jobId] ? { ...prev, [jobId]: { ...prev[jobId], progress } } : prev,
+      );
+    });
+
+    socket.on("video-completed", ({ jobId }) => {
       addToast(
         "success",
         "Processing complete",
-        `Job #${data.jobId} finished. Video is ready to play.`,
+        `Job #${jobId} — all resolutions ready.`,
       );
+      // Linger at 100% briefly so the user sees it finish
+      setTimeout(() => {
+        setActiveJobs((prev) => {
+          const n = { ...prev };
+          delete n[jobId];
+          return n;
+        });
+      }, 1500);
       fetchVideos();
     });
 
-    socket.on("video-failed", (data) => {
-      addToast(
-        "error",
-        "Processing failed",
-        `Job #${data.jobId} encountered an error.`,
-      );
+    socket.on("video-failed", ({ jobId, message }) => {
+      addToast("error", "Processing failed", `Job #${jobId}: ${message}`);
+      setActiveJobs((prev) => {
+        const n = { ...prev };
+        delete n[jobId];
+        return n;
+      });
     });
 
     return () => {
+      socket.off("video-progress");
       socket.off("video-completed");
       socket.off("video-failed");
     };
   }, []);
 
-  const handleUpload = async (e) => {
+  // Use XHR instead of fetch — only XHR exposes upload progress events
+  const handleUpload = (e) => {
     e.preventDefault();
     if (!file) return;
 
     const formData = new FormData();
     formData.append("video", file);
 
-    try {
-      setUploading(true);
-      const res = await fetch("http://localhost:5000/upload", {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) throw new Error("Upload failed");
-      const data = await res.json();
-      addToast(
-        "info",
-        "Upload successful",
-        `Compression queued — Job #${data.jobId}. You'll be notified when it's ready.`,
-      );
-      setFile(null);
-      fetchVideos();
-    } catch (err) {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable)
+        setUploadProgress(Math.round((ev.loaded / ev.total) * 100));
+    };
+
+    xhr.onload = () => {
+      setUploadProgress(null);
+      if (xhr.status === 202) {
+        const data = JSON.parse(xhr.responseText);
+        // Register this job so its progress card appears
+        setActiveJobs((prev) => ({
+          ...prev,
+          [data.jobId]: { filename: file.name, progress: 0 },
+        }));
+        addToast(
+          "info",
+          "Upload complete",
+          `Compression queued — Job #${data.jobId}`,
+        );
+        setFile(null);
+        fetchVideos();
+      } else {
+        const err = (() => {
+          try {
+            return JSON.parse(xhr.responseText);
+          } catch {
+            return {};
+          }
+        })();
+        addToast("error", "Upload failed", err.error ?? "Unknown error");
+      }
+    };
+
+    xhr.onerror = () => {
+      setUploadProgress(null);
       addToast(
         "error",
         "Upload failed",
-        "Something went wrong. Please try again.",
+        "Network error — check your connection.",
       );
-    } finally {
-      setUploading(false);
-    }
+    };
+
+    xhr.open("POST", "http://localhost:5000/upload");
+    xhr.send(formData);
+    setUploadProgress(0);
   };
 
   const handleSelectVideo = (video) => {
     setSelectedVideo(video);
-    const sorted = [...video.versions].sort(
-      (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
+    setSelectedResolution(
+      [...video.versions].sort(
+        (a, b) => parseInt(b.resolution) - parseInt(a.resolution),
+      )[0],
     );
-    setSelectedResolution(sorted[0]);
   };
+
+  const isUploading = uploadProgress !== null;
 
   return (
     <>
       <style>{`
-        @keyframes slideIn {
-          from { opacity: 0; transform: translateX(18px); }
-          to   { opacity: 1; transform: translateX(0); }
-        }
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-        .upload-label:hover { background: #2563eb !important; }
-        .upload-btn:hover:not(:disabled) { background: #15803d !important; }
-        .refresh-btn:hover { background: #0f766e !important; }
-        .play-btn:hover { background: #2563eb !important; }
-        .video-item:hover { border-color: #bfdbfe !important; background: #f8fafc !important; }
+        @keyframes slideIn { from{opacity:0;transform:translateX(18px)} to{opacity:1;transform:translateX(0)} }
+        @keyframes slideUp { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes spin    { to{transform:rotate(360deg)} }
+        * { box-sizing:border-box; }
+        body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+        .btn-blue:hover:not(:disabled)  { background:#2563eb !important; }
+        .btn-green:hover:not(:disabled) { background:#15803d !important; }
+        .btn-teal:hover  { background:#0f766e !important; }
+        .video-item:hover{ border-color:#bfdbfe !important; background:#f8fafc !important; }
       `}</style>
 
       <ToastContainer toasts={toasts} remove={removeToast} />
+      <ActiveJobsPanel jobs={activeJobs} />
 
       <div
         style={{
@@ -638,11 +628,10 @@ function App() {
           Teacher Upload Portal
         </h1>
         <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 32px" }}>
-          Upload a video — it will be automatically compressed to 720p, 480p,
-          and 360p.
+          Upload a video — automatically compressed to 720p, 480p, and 360p.
         </p>
 
-        {/* ── Upload form ── */}
+        {/* Upload card */}
         <div
           style={{
             background: "#fff",
@@ -660,7 +649,7 @@ function App() {
             style={{ display: "flex", gap: 10, alignItems: "center" }}
           >
             <label
-              className="upload-label"
+              className="btn-blue"
               style={{
                 padding: "9px 18px",
                 background: "#3b82f6",
@@ -693,27 +682,38 @@ function App() {
 
             <button
               type="submit"
-              disabled={!file || uploading}
-              className="upload-btn"
+              disabled={!file || isUploading}
+              className="btn-green"
               style={{
                 marginLeft: "auto",
                 padding: "9px 22px",
-                background: !file || uploading ? "#d1d5db" : "#16a34a",
+                background: !file || isUploading ? "#d1d5db" : "#16a34a",
                 color: "#fff",
                 border: "none",
                 borderRadius: 8,
-                cursor: !file || uploading ? "not-allowed" : "pointer",
+                cursor: !file || isUploading ? "not-allowed" : "pointer",
                 fontSize: 13.5,
                 fontWeight: 500,
                 transition: "background 0.15s",
               }}
             >
-              {uploading ? "Uploading…" : "Upload"}
+              {isUploading ? `Uploading… ${uploadProgress}%` : "Upload"}
             </button>
           </form>
+
+          {isUploading && (
+            <div style={{ marginTop: 14 }}>
+              <ProgressBar
+                value={uploadProgress}
+                color="#16a34a"
+                label="Uploading to server"
+                sublabel={`${uploadProgress}%`}
+              />
+            </div>
+          )}
         </div>
 
-        {/* ── Video list ── */}
+        {/* Video list */}
         <div>
           <div
             style={{
@@ -728,7 +728,7 @@ function App() {
             </h2>
             <button
               onClick={fetchVideos}
-              className="refresh-btn"
+              className="btn-teal"
               style={{
                 padding: "7px 14px",
                 background: "#0d9488",
@@ -784,15 +784,18 @@ function App() {
                     >
                       {vid.versions.length} version
                       {vid.versions.length !== 1 ? "s" : ""} ·{" "}
-                      {vid.versions
+                      {[...vid.versions]
+                        .sort(
+                          (a, b) =>
+                            parseInt(b.resolution) - parseInt(a.resolution),
+                        )
                         .map((v) => `${v.resolution}p`)
-                        .sort((a, b) => parseInt(b) - parseInt(a))
                         .join(", ")}
                     </div>
                   </div>
                   <button
                     onClick={() => handleSelectVideo(vid)}
-                    className="play-btn"
+                    className="btn-blue"
                     style={{
                       padding: "7px 16px",
                       background: "#3b82f6",
@@ -813,7 +816,7 @@ function App() {
           )}
         </div>
 
-        {/* ── Video player ── */}
+        {/* Player */}
         {selectedVideo && selectedResolution && (
           <div style={{ marginTop: 36 }}>
             <div
@@ -824,14 +827,7 @@ function App() {
                 marginBottom: 12,
               }}
             >
-              <h3
-                style={{
-                  fontSize: 16,
-                  fontWeight: 700,
-                  margin: 0,
-                  color: "#1e293b",
-                }}
-              >
+              <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>
                 {selectedVideo.original_filename}
               </h3>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -854,7 +850,6 @@ function App() {
                     fontSize: 13,
                     background: "#fff",
                     color: "#1e293b",
-                    cursor: "pointer",
                   }}
                 >
                   {[...selectedVideo.versions]
@@ -869,7 +864,6 @@ function App() {
                 </select>
               </div>
             </div>
-
             <video
               key={selectedResolution.filename}
               controls
@@ -889,5 +883,3 @@ function App() {
     </>
   );
 }
-
-export default App;
