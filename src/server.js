@@ -57,15 +57,24 @@ const ALLOWED_MIME_TYPES = [
   "video/x-msvideo",
   "video/x-matroska",
   "video/mpeg",
+  "video/mkv",
+  "application/x-matroska",
+  "application/octet-stream"
 ];
 
 function validateVideoMime(req, res, next) {
   const mime = req.file?.mimetype;
-  if (!mime || !ALLOWED_MIME_TYPES.includes(mime)) {
+  const originalName = req.file?.originalname || "";
+  const ext = path.extname(originalName).toLowerCase();
+
+  const isValidMime = mime && ALLOWED_MIME_TYPES.includes(mime);
+  const isValidExt = [".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg", ".mpg"].includes(ext);
+
+  if (!isValidMime && !isValidExt) {
     if (req.file?.path) fs.unlink(req.file.path, () => {});
     return res
       .status(415)
-      .json({ error: `Unsupported file type: ${mime ?? "unknown"}.` });
+      .json({ error: `Unsupported file type: ${mime ?? "unknown"} (ext: ${ext}).` });
   }
   next();
 }
