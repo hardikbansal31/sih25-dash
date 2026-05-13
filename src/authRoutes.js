@@ -1,16 +1,17 @@
 import express from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import "dotenv/config";
 import mysql from "mysql2/promise";
 import { JWT_SECRET, verifyToken } from "./authMiddleware.js";
 
 export const authRouter = express.Router();
 
 const db = await mysql.createConnection({
-  host: "localhost",
-  user: "dashuser",
-  password: "mypassword",
-  database: "vid",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "dashuser",
+  password: process.env.DB_PASSWORD || "mypassword",
+  database: process.env.DB_NAME || "vid",
 });
 
 // POST /auth/login

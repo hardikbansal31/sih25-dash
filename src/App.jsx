@@ -10,7 +10,7 @@ import { UploadCard } from "./components/UploadCard.jsx";
 import { VideoList } from "./components/VideoList.jsx";
 import { HlsPlayer } from "./components/HlsPlayer.jsx";
 
-const API = "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 const socket = io(API);
 
 // ── Auth helpers ──────────────────────────────────────────────────────────────

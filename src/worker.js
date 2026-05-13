@@ -3,13 +3,14 @@ import { connection } from "./queueSetup.js";
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import "dotenv/config";
 import mysql from "mysql2/promise";
 
 const db = await mysql.createConnection({
-  host: "localhost",
-  user: "dashuser",
-  password: "mypassword",
-  database: "vid",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "dashuser",
+  password: process.env.DB_PASSWORD || "mypassword",
+  database: process.env.DB_NAME || "vid",
 });
 
 const compressedDir = path.join(process.cwd(), "compressed");

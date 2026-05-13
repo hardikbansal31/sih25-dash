@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import multer from "multer";
 import fs from "fs";
@@ -12,14 +13,14 @@ import { verifyToken, requireRole } from "./authMiddleware.js";
 
 const app = express();
 const server = http.createServer(app);
-const PORT = 5000;
+const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: "http://localhost:5173", methods: ["GET", "POST"] }));
+app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:5173", methods: ["GET", "POST"] }));
 app.use(express.json());
 app.use("/auth", authRouter);
 
 const io = new Server(server, {
-  cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] },
+  cors: { origin: process.env.FRONTEND_URL || "http://localhost:5173", methods: ["GET", "POST"] },
 });
 
 io.on("connection", (socket) => {
@@ -56,15 +57,24 @@ const ALLOWED_MIME_TYPES = [
   "video/x-msvideo",
   "video/x-matroska",
   "video/mpeg",
+  "video/mkv",
+  "application/x-matroska",
+  "application/octet-stream"
 ];
 
 function validateVideoMime(req, res, next) {
   const mime = req.file?.mimetype;
-  if (!mime || !ALLOWED_MIME_TYPES.includes(mime)) {
+  const originalName = req.file?.originalname || "";
+  const ext = path.extname(originalName).toLowerCase();
+
+  const isValidMime = mime && ALLOWED_MIME_TYPES.includes(mime);
+  const isValidExt = [".mp4", ".webm", ".mov", ".avi", ".mkv", ".mpeg", ".mpg"].includes(ext);
+
+  if (!isValidMime && !isValidExt) {
     if (req.file?.path) fs.unlink(req.file.path, () => {});
     return res
       .status(415)
-      .json({ error: `Unsupported file type: ${mime ?? "unknown"}.` });
+      .json({ error: `Unsupported file type: ${mime ?? "unknown"} (ext: ${ext}).` });
   }
   next();
 }
@@ -116,10 +126,10 @@ app.use(
 // ── MySQL ─────────────────────────────────────────────────────────────────────
 
 const db = mysql.createConnection({
-  host: "localhost",
-  user: "dashuser",
-  password: "mypassword",
-  database: "vid",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "dashuser",
+  password: process.env.DB_PASSWORD || "mypassword",
+  database: process.env.DB_NAME || "vid",
 });
 
 db.connect((err) => {
@@ -202,7 +212,7 @@ app.get("/videos", verifyToken, (req, res) => {
       id: row.video_id,
       original_filename: row.original_filename,
       // hls.js will fetch: GET /hls/1/master.m3u8
-      hlsUrl: `http://localhost:${PORT}/hls/${row.master_path}`,
+      hlsUrl: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/hls/${row.master_path}`,
     }));
 
     res.json(videos);
