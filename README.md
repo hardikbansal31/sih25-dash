@@ -128,7 +128,7 @@ node src/worker.js
 npm run dev
 ```
 
-Open `http://localhost:5173`. Default credentials after seeding:
+Open `http://localhost:8080`. Default credentials after seeding:
 
 | Username | Password | Role |
 |---|---|---|
@@ -144,7 +144,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Open `http://localhost:5173`. Everything — MySQL, Redis, server, worker, and frontend — starts with that single command.
+Open `http://localhost:8080`. Everything — MySQL, Redis, server, worker, and frontend — starts with that single command.
 
 ---
 
