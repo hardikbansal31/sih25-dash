@@ -22,6 +22,7 @@ async function setup() {
     CREATE TABLE IF NOT EXISTS videos (
       id INT AUTO_INCREMENT PRIMARY KEY,
       original_filename VARCHAR(255) NOT NULL,
+      s3_key VARCHAR(255),
       uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);

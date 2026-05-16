@@ -10,6 +10,18 @@ import { videoQueue, queueEvents } from "./queueSetup.js";
 import http from "http";
 import { authRouter } from "./authRoutes.js";
 import { verifyToken, requireRole } from "./authMiddleware.js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+
+// ── S3 / DigitalOcean Spaces Client ──────────────────────────────────────────
+const s3Client = new S3Client({
+  endpoint: process.env.SPACES_ENDPOINT, // e.g., https://nyc3.digitaloceanspaces.com
+  region: "us-east-1", // DigitalOcean Spaces requires us-east-1 for compatibility
+  credentials: {
+    accessKeyId: process.env.SPACES_KEY,
+    secretAccessKey: process.env.SPACES_SECRET,
+  },
+});
 
 const app = express();
 const server = http.createServer(app);
@@ -152,37 +164,66 @@ app.post(
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    db.query(
-      "INSERT INTO videos (original_filename) VALUES (?)",
-      [req.file.originalname],
-      async (err, result) => {
-        if (err) return res.status(500).json({ error: "DB insert failed" });
+    try {
+      // 1. Upload raw file to DigitalOcean Spaces
+      const fileStream = fs.createReadStream(req.file.path);
+      const s3Path = `uploads/${Date.now()}-${req.file.originalname}`;
+      
+      const upload = new Upload({
+        client: s3Client,
+        params: {
+          Bucket: process.env.SPACES_BUCKET,
+          Key: s3Path,
+          Body: fileStream,
+          ACL: "private", // Keep raw files private
+          ContentType: req.file.mimetype,
+        },
+      });
 
-        const videoId = result.insertId;
+      await upload.done();
 
-        try {
-          const job = await videoQueue.add(
-            "compress-video",
-            { videoId, inputPath: req.file.path },
-            {
-              attempts: 3,
-              backoff: { type: "exponential", delay: 1000 },
-              removeOnComplete: { age: 7 * 24 * 3600 },
-              removeOnFail: false,
-            },
-          );
+      // 2. Insert into DB
+      db.query(
+        "INSERT INTO videos (original_filename, s3_key) VALUES (?, ?)",
+        [req.file.originalname, s3Path],
+        async (err, result) => {
+          if (err) {
+             console.error("DB Error:", err);
+             return res.status(500).json({ error: "DB insert failed" });
+          }
 
-          res.status(202).json({
-            message: "Video uploaded. HLS compression queued.",
-            jobId: job.id,
-            videoId,
-          });
-        } catch (err) {
-          console.error("Queue error:", err);
-          res.status(500).json({ error: "Failed to queue video" });
-        }
-      },
-    );
+          const videoId = result.insertId;
+
+          try {
+            const job = await videoQueue.add(
+              "compress-video",
+              { videoId, s3Key: s3Path }, // Send S3 Key to worker instead of local path
+              {
+                attempts: 3,
+                backoff: { type: "exponential", delay: 1000 },
+                removeOnComplete: { age: 7 * 24 * 3600 },
+                removeOnFail: false,
+              },
+            );
+
+            // 3. Clean up local temp file
+            fs.unlink(req.file.path, () => {});
+
+            res.status(202).json({
+              message: "Video uploaded to cloud. HLS compression queued.",
+              jobId: job.id,
+              videoId,
+            });
+          } catch (err) {
+            console.error("Queue error:", err);
+            res.status(500).json({ error: "Failed to queue video" });
+          }
+        },
+      );
+    } catch (err) {
+      console.error("S3 Upload Error:", err);
+      res.status(500).json({ error: "Cloud storage upload failed" });
+    }
   },
 );
 
@@ -207,12 +248,11 @@ app.get("/videos", verifyToken, (req, res) => {
     }
 
     // master_path is stored as e.g. "1/master.m3u8"
-    // We expose a full URL the frontend can pass directly to hls.js
+    // We expose a full CDN URL from DigitalOcean Spaces
     const videos = results.map((row) => ({
       id: row.video_id,
       original_filename: row.original_filename,
-      // hls.js will fetch: GET /hls/1/master.m3u8
-      hlsUrl: `${process.env.BACKEND_URL || `http://localhost:${PORT}`}/hls/${row.master_path}`,
+      hlsUrl: `${process.env.SPACES_CDN_URL}/${row.master_path}`,
     }));
 
     res.json(videos);

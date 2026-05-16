@@ -5,6 +5,18 @@ import fs from "fs";
 import path from "path";
 import "dotenv/config";
 import mysql from "mysql2/promise";
+import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+
+// ── S3 / DigitalOcean Spaces Client ──────────────────────────────────────────
+const s3Client = new S3Client({
+  endpoint: process.env.SPACES_ENDPOINT,
+  region: "us-east-1",
+  credentials: {
+    accessKeyId: process.env.SPACES_KEY,
+    secretAccessKey: process.env.SPACES_SECRET,
+  },
+});
 
 const db = await mysql.createConnection({
   host: process.env.DB_HOST || "localhost",
@@ -193,16 +205,32 @@ function writeMasterPlaylist(outputDir) {
 const worker = new Worker(
   "video-compression",
   async (job) => {
-    const { videoId, inputPath } = job.data;
+    const { videoId, s3Key } = job.data;
     console.log(`[Job ${job.id}] Processing video ${videoId}…`);
 
     await job.updateProgress(0);
 
+    // 1. Download raw file from Spaces to local temp path
+    const localInputPath = path.join(process.cwd(), "uploads", `raw-${Date.now()}`);
+    const getObjectCommand = new GetObjectCommand({
+      Bucket: process.env.SPACES_BUCKET,
+      Key: s3Key,
+    });
+    
+    const response = await s3Client.send(getObjectCommand);
+    const writeStream = fs.createWriteStream(localInputPath);
+    await new Promise((resolve, reject) => {
+      response.Body.pipe(writeStream);
+      writeStream.on("finish", resolve);
+      writeStream.on("error", reject);
+    });
+
     // Each video gets its own output directory: compressed/<videoId>/
     const outputDir = path.join(compressedDir, String(videoId));
+    if (fs.existsSync(outputDir)) fs.rmSync(outputDir, { recursive: true });
     fs.mkdirSync(outputDir, { recursive: true });
 
-    const stepSize = Math.floor(100 / RENDITIONS.length); // 33 per rendition
+    const stepSize = Math.floor(80 / RENDITIONS.length); // 80% for encoding
 
     for (let i = 0; i < RENDITIONS.length; i++) {
       const rendition = RENDITIONS[i];
@@ -210,7 +238,7 @@ const worker = new Worker(
 
       console.log(`[Job ${job.id}] Encoding ${rendition.label}…`);
       await encodeRendition(
-        inputPath,
+        localInputPath,
         outputDir,
         rendition,
         job,
@@ -218,24 +246,46 @@ const worker = new Worker(
         stepSize,
       );
 
-      await job.updateProgress(progressBase + stepSize); // snap to milestone
+      await job.updateProgress(progressBase + stepSize); 
     }
 
-    // Write the master playlist that references all three rendition playlists
+    // Write the master playlist
     const masterPath = writeMasterPlaylist(outputDir);
 
-    // Store the relative path (relative to compressedDir) in the DB
-    const relativeMasterPath = path.relative(compressedDir, masterPath);
+    // 2. Upload the entire HLS folder back to Spaces
+    console.log(`[Job ${job.id}] Uploading HLS segments to Spaces…`);
+    const files = fs.readdirSync(outputDir);
+    for (const file of files) {
+      const filePath = path.join(outputDir, file);
+      const fileStream = fs.createReadStream(filePath);
+      const destinationKey = `hls/${videoId}/${file}`;
+
+      const upload = new Upload({
+        client: s3Client,
+        params: {
+          Bucket: process.env.SPACES_BUCKET,
+          Key: destinationKey,
+          Body: fileStream,
+          ACL: "public-read", // HLS segments must be public for streaming
+          ContentType: file.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp2t",
+        },
+      });
+      await upload.done();
+    }
+
+    const relativeMasterPath = `hls/${videoId}/master.m3u8`;
 
     await db.query(
       "INSERT INTO video_versions (video_id, master_path) VALUES (?, ?)",
       [videoId, relativeMasterPath],
     );
 
-    fs.unlink(inputPath, () => {});
+    // 3. Clean up
+    fs.unlinkSync(localInputPath);
+    fs.rmSync(outputDir, { recursive: true });
     await job.updateProgress(100);
 
-    console.log(`[Job ${job.id}] Done. HLS output: ${outputDir}`);
+    console.log(`[Job ${job.id}] Done. HLS uploaded to cloud.`);
     return { masterPath: relativeMasterPath };
   },
   { connection, concurrency: 1 },
